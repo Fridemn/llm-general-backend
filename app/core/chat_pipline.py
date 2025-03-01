@@ -5,7 +5,7 @@ from fastapi import HTTPException
 import json
 
 from app import logger
-from app.core.llm import BaseLLM, ChatMessage, LLMResponse as RawLLMResponse, OpenAILLM, AnthropicLLM, LLMConfig
+from app.core.llm import BaseLLM, ChatMessage, LLMResponse as RawLLMResponse, OpenAILLM, AnthropicLLM, LLMConfig ,OllamaLLM
 from app.core.llm.config import llm_config, MODEL_TO_ENDPOINT, DEFAULT_MODEL
 from app.core.llm.db_history import db_message_history
 from app.core.llm.message import LLMMessage, LLMResponse, MessageSender, MessageRole, MessageComponent, MessageType
@@ -33,6 +33,8 @@ class ChatPipeline:
                 # 根据endpoint类型选择对应的LLM实现
                 if endpoint == "anthropic":
                     self.llm_instances[model] = AnthropicLLM(llm_config_obj)
+                elif endpoint == "ollama":
+                    self.llm_instances[model] = OllamaLLM(llm_config_obj)
                 else:
                     self.llm_instances[model] = OpenAILLM(llm_config_obj)
     

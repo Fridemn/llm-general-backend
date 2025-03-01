@@ -65,6 +65,11 @@ DEFAULT_CONFIG={
             "base_url": "https://api.anthropic.com/v1",
             "available_models": ["claude-3-7-sonnet"]
         },
+        "ollama": {
+            "api_key": "",
+            "base_url": "http://localhost:11434",
+            "available_models": ["huihui_ai/deepseek-r1-abliterated:7b"]
+        },
         "custom_endpoint": {
             "api_key": "your-custom-key",
             "base_url": "http://your-custom-endpoint",
