@@ -9,7 +9,7 @@ from tortoise.exceptions import OperationalError, ConfigurationError
 from tortoise import Tortoise
 from tortoise.functions import Count
 
-from app.models.chat import ChatHistory, MessageRole
+from app.models.chat import ChatHistory, ChatMessage, MessageRole
 from app.core.llm.message import LLMMessage, MessageComponent, MessageType
 
 logger = logging.getLogger("app")
@@ -22,13 +22,10 @@ class DBMessageHistory:
         try:
             # 尝试一个简单的查询来测试连接
             await ChatHistory.all().limit(1)
-            # logger.debug("数据库连接已经初始化")
             return True
         except ConfigurationError:
-            # logger.error("数据库连接未初始化，模型可能未正确注册")
             return False
         except Exception as e:
-            # logger.error(f"数据库连接测试失败: {e}")
             return False
     
     async def create_history(self, user_id: Optional[str] = None, title: str = "新对话") -> str:
@@ -45,13 +42,11 @@ class DBMessageHistory:
                 except ValueError:
                     logger.warning(f"无效的用户ID格式: {user_id}")
                     
-            # 创建新的历史记录，使用空列表初始化messages字段
+            # 创建新的历史记录
             history = await ChatHistory.create(
                 user_id=user_uuid,
-                title=title,
-                messages=[]  # 初始化为空列表
+                title=title
             )
-            # logger.info(f"成功创建历史记录: {history.history_id}")
             return str(history.history_id)
         except Exception as e:
             logger.error(f"创建历史记录失败: {e}")
@@ -75,8 +70,7 @@ class DBMessageHistory:
                 if not history:
                     # 如果历史记录不存在，则创建一个
                     history = await ChatHistory.create(
-                        history_id=history_uuid,
-                        messages=[]
+                        history_id=history_uuid
                     )
                 
                 # 格式化消息组件
@@ -87,38 +81,48 @@ class DBMessageHistory:
                         for comp in message.components
                     ]
                 
-                # 准备token相关数据
-                token_data = {}
-                if message.sender.role == MessageRole.USER or message.sender.role == MessageRole.SYSTEM:
-                    if message.input_tokens is not None:
-                        token_data['input_tokens'] = message.input_tokens
-                    if message.target_model:
-                        token_data['target_model'] = message.target_model
-                elif message.sender.role == MessageRole.ASSISTANT:
-                    if message.output_tokens is not None:
-                        token_data['output_tokens'] = message.output_tokens
-                    if message.source_model:
-                        token_data['source_model'] = message.source_model
+                # 处理角色值，确保只存储实际角色值（如"user"、"assistant"、"system"）
+                role_value = message.sender.role
+                # 如果角色是字符串形式的枚举（如"MessageRole.ASSISTANT"），提取实际值
+                if isinstance(role_value, str) and role_value.startswith("MessageRole."):
+                    role_value = role_value.split(".", 1)[1].lower()
+                # 如果角色是枚举对象，获取其值
+                elif hasattr(role_value, "value"):
+                    role_value = role_value.value
                 
-                # 构造消息字典
-                message_dict = {
-                    "message_id": message.message_id,
-                    "role": str(message.sender.role),  # 确保存储的是枚举值字符串，而不是枚举名称
+                # 准备消息数据
+                message_data = {
+                    "message_id": uuid.UUID(message.message_id) if message.message_id else uuid.uuid4(),
+                    "history": history,
+                    "role": role_value,
                     "content": message.message_str,
                     "components": components,
                     "model": message.sender.nickname,
-                    "timestamp": message.timestamp or int(time.time()),
-                    **token_data
+                    # 用户消息使用传入的时间戳，AI消息使用当前时间戳
+                    "timestamp": (
+                        message.timestamp 
+                        if role_value in [MessageRole.USER, MessageRole.SYSTEM] and message.timestamp
+                        else int(time.time())
+                    ),
                 }
                 
-                # 获取现有消息列表
-                messages = history.get_messages_list()
+                # 添加token相关信息
+                if role_value == MessageRole.USER or role_value == MessageRole.SYSTEM:
+                    if message.input_tokens is not None:
+                        message_data['input_tokens'] = message.input_tokens
+                    if message.target_model:
+                        message_data['target_model'] = message.target_model
+                elif role_value == MessageRole.ASSISTANT:
+                    if message.output_tokens is not None:
+                        message_data['output_tokens'] = message.output_tokens
+                    if message.source_model:
+                        message_data['source_model'] = message.source_model
                 
-                # 添加新消息
-                messages.append(message_dict)
+                # 创建新消息记录
+                await ChatMessage.create(**message_data)
                 
-                # 更新历史记录
-                history.messages = messages
+                # 更新历史记录的更新时间
+                history.update_time = time.time()
                 await history.save()
                 
                 return True
@@ -153,22 +157,14 @@ class DBMessageHistory:
                 logger.warning(f"历史记录不存在: {history_id}")
                 return []
                 
-            # 获取消息列表
-            messages_data = history.get_messages_list()
-            
-            # 对消息按时间戳排序
-            try:
-                messages_data.sort(key=lambda x: x.get('timestamp', 0))
-            except Exception as e:
-                logger.error(f"排序消息失败: {e}")
-            
-            # logger.info(f"从历史记录 {history_id} 获取了 {len(messages_data)} 条消息")
+            # 获取该历史记录的所有消息
+            messages = await ChatMessage.filter(history_id=history_uuid).order_by('timestamp').all()
             
             result = []
-            for msg_data in messages_data:
+            for msg in messages:
                 try:
                     # 解析组件数据
-                    components_data = msg_data.get("components", [])
+                    components_data = msg.components
                         
                     # 构造组件对象
                     components = []
@@ -185,42 +181,38 @@ class DBMessageHistory:
                     
                     # 准备token相关数据
                     token_data = {}
-                    role = msg_data.get("role")
-                    
-                    # 处理消息角色，确保是有效的枚举值
-                    role = msg_data.get("role", "user")
+                    role = msg.role
                     
                     # 检查并修复角色格式
                     if role.startswith("MessageRole."):
-                        # 如果是 "MessageRole.USER" 这种格式，提取实际的角色
                         actual_role = role.split(".", 1)[1].lower()
                         if actual_role in ["user", "assistant", "system"]:
                             role = actual_role
                         else:
-                            role = "user"  # 默认为用户角色
+                            role = "user"
                     
                     if role == MessageRole.USER or role == MessageRole.SYSTEM:
-                        if "input_tokens" in msg_data:
-                            token_data['input_tokens'] = msg_data.get("input_tokens")
-                        if "target_model" in msg_data:
-                            token_data['target_model'] = msg_data.get("target_model")
+                        if msg.input_tokens is not None:
+                            token_data['input_tokens'] = msg.input_tokens
+                        if msg.target_model:
+                            token_data['target_model'] = msg.target_model
                     elif role == MessageRole.ASSISTANT:
-                        if "output_tokens" in msg_data:
-                            token_data['output_tokens'] = msg_data.get("output_tokens")
-                        if "source_model" in msg_data:
-                            token_data['source_model'] = msg_data.get("source_model")
+                        if msg.output_tokens is not None:
+                            token_data['output_tokens'] = msg.output_tokens
+                        if msg.source_model:
+                            token_data['source_model'] = msg.source_model
                     
                     # 创建消息对象
                     message = LLMMessage(
-                        message_id=msg_data.get("message_id", str(uuid.uuid4())),
+                        message_id=str(msg.message_id),
                         history_id=history_id,
                         sender={
-                            "role": role,  # 使用修复后的角色
-                            "nickname": msg_data.get("model")
+                            "role": role,
+                            "nickname": msg.model
                         },
                         components=components,
-                        message_str=msg_data.get("content", ""),
-                        timestamp=msg_data.get("timestamp", int(time.time())),
+                        message_str=msg.content,
+                        timestamp=msg.timestamp,
                         **token_data
                     )
                     result.append(message)
@@ -246,11 +238,13 @@ class DBMessageHistory:
             except ValueError:
                 logger.error(f"无效的历史记录ID格式: {history_id}")
                 return False
-                
-            # 直接删除历史记录
+            
+            # 首先删除关联的消息
+            await ChatMessage.filter(history_id=history_uuid).delete()
+            
+            # 然后删除历史记录
             deleted_count = await ChatHistory.filter(history_id=history_uuid).delete()
             if deleted_count > 0:
-                # logger.info(f"成功删除历史记录: {history_id}")
                 return True
             else:
                 logger.warning(f"要删除的历史记录不存在: {history_id}")
@@ -267,17 +261,23 @@ class DBMessageHistory:
         await self._ensure_connection()
         
         try:
+            # 获取所有历史记录
             histories = await ChatHistory.filter(user_id=user_id).order_by('-update_time').all()
-            return [
-                {
+            
+            result = []
+            for h in histories:
+                # 获取每个历史记录的消息数量
+                message_count = await ChatMessage.filter(history_id=h.history_id).count()
+                
+                result.append({
                     "history_id": str(h.history_id),
                     "title": h.title,
                     "create_time": h.create_time.isoformat(),
                     "update_time": h.update_time.isoformat(),
-                    "message_count": len(h.get_messages_list())  # 添加消息数量统计
-                }
-                for h in histories
-            ]
+                    "message_count": message_count
+                })
+            
+            return result
         except Exception as e:
             logger.error(f"获取用户历史记录失败: {e}")
             return []
@@ -301,28 +301,21 @@ class DBMessageHistory:
     async def update_message(self, history_id: str, message_id: str, updates: dict) -> bool:
         """更新历史记录中的特定消息"""
         try:
-            history_uuid = uuid.UUID(history_id)
-            history = await ChatHistory.filter(history_id=history_uuid).first()
-            if not history:
+            # 直接更新消息表中的记录
+            message = await ChatMessage.filter(
+                history_id=uuid.UUID(history_id),
+                message_id=uuid.UUID(message_id)
+            ).first()
+            
+            if not message:
                 return False
                 
-            messages = history.get_messages_list()
-            updated = False
-            
-            for i, msg in enumerate(messages):
-                if msg.get("message_id") == message_id:
-                    # 更新消息字段
-                    messages[i].update(updates)
-                    updated = True
-                    break
-            
-            if updated:
-                # 保存更新后的消息列表
-                history.messages = messages
-                await history.save()
-                return True
-            
-            return False
+            # 更新消息字段
+            for key, value in updates.items():
+                setattr(message, key, value)
+                
+            await message.save()
+            return True
         except Exception as e:
             logger.error(f"更新消息失败: {e}")
             return False
