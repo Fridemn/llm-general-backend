@@ -13,6 +13,7 @@ import traceback
 import logging
 import json
 import uuid  # 添加uuid模块导入
+import os
 
 from app.core.chat_pipline import chat_pipeline
 from app.core.llm.config import MODEL_TO_ENDPOINT, DEFAULT_MODEL
@@ -20,6 +21,8 @@ from app.core.llm.message import LLMMessage, LLMResponse, MessageRole, MessageCo
 from app.core.llm.db_history import db_message_history
 from app.api.user import get_current_user
 from app.models.chat import ChatHistory
+from app.utils.stt import STTProcessor, STTStrategy
+from app import app_config
 
 
 logger = logging.getLogger("app")
@@ -33,6 +36,14 @@ class ChatRequest(BaseModel):
 
 class HistoryUpdateRequest(BaseModel):
     title: str
+
+class AudioChatRequest(BaseModel):
+    file_path: str
+    model: Optional[str] = None
+    history_id: Optional[str] = None
+    role: MessageRole = MessageRole.USER
+    stt_model: Optional[str] = None
+    translate_to_english: bool = False
 
 #------------------------------
 # LLM 对话部分，有两种方式，一种是直接返回对话结果，一种是流式返回对话结果
@@ -156,6 +167,114 @@ async def chat_stream(request: ChatRequest, current_user=Depends(get_current_use
         error_trace = traceback.format_exc()
         logger.error(f"API异常: {str(e)}\n{error_trace}")
         raise HTTPException(status_code=500, detail=f"处理消息失败: {str(e)}")
+
+@api_llm.post("/chat/voice/stream")
+async def voice_chat_stream(request: AudioChatRequest, current_user=Depends(get_current_user)):
+    """接收语音文件后转录并流式返回聊天响应"""
+    try:
+        # 验证文件是否存在
+        if not os.path.exists(request.file_path):
+            raise HTTPException(status_code=404, detail=f"文件未找到: {request.file_path}")
+        
+        # 从配置中加载STT设置
+        stt_config = app_config.stt_config
+        api_key = stt_config['whisper']['api_key']
+        
+        # 如果用户没有指定模型，则使用配置中的第一个模型
+        stt_model = request.stt_model or stt_config['whisper']['available_models'][0]
+        api_base = stt_config['whisper']['base_url']
+        
+        # 根据是否需要翻译选择策略
+        strategy = STTStrategy.TRANSLATE if request.translate_to_english else STTStrategy.STANDARD
+        
+        # 初始化处理器
+        processor = STTProcessor(api_key=api_key, model=stt_model, strategy=strategy)
+        
+        # 处理音频文件
+        try:
+            transcribed_text = processor.process(request.file_path)
+            logger.info(f"语音转录结果: {transcribed_text}")
+        except Exception as e:
+            logger.error(f"音频转录失败: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"音频转录失败: {str(e)}")
+            
+        # 检查转录结果是否为空
+        if not transcribed_text.strip():
+            raise HTTPException(status_code=400, detail="语音转录结果为空")
+            
+        # 准备聊天请求参数
+        model = request.model or DEFAULT_MODEL
+        history_id = request.history_id if request.history_id and request.history_id.strip() else None
+        
+        # 构造输入消息
+        input_message = LLMMessage.from_text(
+            text=transcribed_text,
+            history_id=history_id or "",  # 如果为None则传空字符串
+            role=request.role
+        )
+        
+        # 获取当前用户ID
+        user_id = str(current_user["user_id"]) if current_user else None
+        
+        # 创建流式响应生成器
+        async def generate():
+            try:
+                # 首先返回识别结果
+                yield f"data: {json.dumps({'transcription': transcribed_text})}\n\n"
+                
+                count = 0
+                
+                async for chunk in chat_pipeline.process_message_stream(
+                    model,
+                    input_message,
+                    history_id,
+                    user_id
+                ):
+                    count += 1
+                    
+                    # 检查是否是token信息特殊标记
+                    if chunk.startswith("__TOKEN_INFO__"):
+                        try:
+                            token_data = json.loads(chunk[14:])  # 去掉特殊前缀
+                            token_response = f"data: {json.dumps({'token_info': token_data})}\n\n"
+                            yield token_response
+                        except Exception as e:
+                            logger.error(f"处理token信息失败: {str(e)}")
+                    else:
+                        # 将普通文本块包装为SSE格式
+                        response_text = f"data: {json.dumps({'text': chunk})}\n\n"
+                        if count % 10 == 0:  # 减少日志输出频率
+                            logger.info(f"生成第{count}个块")
+                        yield response_text
+                
+                # 如果没有生成任何内容
+                if count == 0:
+                    yield f"data: {json.dumps({'text': '未能生成响应'})}\n\n"
+            except Exception as e:
+                error_trace = traceback.format_exc()
+                logger.error(f"流式处理失败: {str(e)}\n{error_trace}")
+                yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            finally:
+                # 标记流结束
+                yield "data: [DONE]\n\n"
+        
+        # 确保设置正确的 SSE 响应头
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no", 
+                "Content-Type": "text/event-stream"
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_trace = traceback.format_exc()
+        logger.error(f"语音聊天API异常: {str(e)}\n{error_trace}")
+        raise HTTPException(status_code=500, detail=f"处理语音聊天失败: {str(e)}")
 
 #------------------------------
 #历史记录部分，包括创建、获取、删除历史记录

@@ -53,6 +53,13 @@ DEFAULT_CONFIG={
         "alibaba_cloud_accesskey_secret": alibaba_cloud_accesskey_secret,
         "sign_name": sign_name,
     },
+    "stt_config": {
+        "whisper": {
+            "api_key": api_key,
+            "base_url": base_url,
+            "available_models": ["whisper-1"]
+        },
+    },
     "llm_config": {
     "endpoints": {
         "openai": {
