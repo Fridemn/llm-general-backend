@@ -28,6 +28,7 @@ from app.api.user import get_current_user
 from app.models.chat import ChatHistory
 from app.utils.stt import STTProcessor, STTStrategy
 from app import app_config
+from app.core.tts.edge_strategy import ProviderEdgeTTS  # 导入TTS处理类
 
 
 logger = logging.getLogger("app")
@@ -200,6 +201,7 @@ async def unified_chat(
                         yield f"data: {json.dumps({'transcription': transcribed_text})}\n\n"
                         
                         count = 0
+                        full_response_text = ""  # 收集完整响应用于TTS
                         
                         async for chunk in chat_pipeline.process_message_stream(
                             model,
@@ -218,9 +220,55 @@ async def unified_chat(
                                 except Exception as e:
                                     logger.error(f"处理token信息失败: {str(e)}")
                             else:
+                                # 收集完整响应文本用于TTS
+                                full_response_text += chunk
                                 # 将普通文本块包装为SSE格式
                                 response_text = f"data: {json.dumps({'text': chunk})}\n\n"
                                 yield response_text
+                        
+                        # 如果需要TTS且有响应文本
+                        if tts and full_response_text.strip():
+                            try:
+                                # 读取TTS配置
+                                if hasattr(app_config, 'tts_config') and app_config.tts_config:
+                                    tts_config = app_config.tts_config
+                                else:
+                                    tts_config = {
+                                        "edge-tts": {
+                                            "id": "edge_tts",
+                                            "type": "edge_tts",
+                                            "edge-tts-voice": "zh-CN-XiaoxiaoNeural"
+                                        }
+                                    }
+                                
+                                # 确保edge-tts配置存在
+                                edge_tts_config = tts_config.get("edge-tts")
+                                if not edge_tts_config:
+                                    edge_tts_config = {
+                                        "id": "edge_tts",
+                                        "type": "edge_tts",
+                                        "edge-tts-voice": "zh-CN-XiaoxiaoNeural"
+                                    }
+                                
+                                # 创建TTS提供者
+                                tts_provider = ProviderEdgeTTS(
+                                    provider_config=edge_tts_config,
+                                    provider_settings={}
+                                )
+                                
+                                # 生成音频文件
+                                audio_path = await tts_provider.get_audio(full_response_text)
+                                
+                                # 构造相对URL，使前端能够访问
+                                audio_url = f"/static/audio/{os.path.basename(audio_path)}" if audio_path else None
+                                
+                                # 返回音频文件路径
+                                yield f"data: {json.dumps({'audio': audio_url})}\n\n"
+                                logger.info(f"TTS音频生成成功: {audio_path}")
+                                
+                            except Exception as e:
+                                logger.error(f"TTS处理失败: {str(e)}")
+                                yield f"data: {json.dumps({'tts_error': str(e)})}\n\n"
                         
                         # 如果没有生成任何内容
                         if count == 0:
@@ -257,10 +305,65 @@ async def unified_chat(
                         user_id
                     )
                     
-                    # 如果需要TTS处理（预留功能）
-                    if tts:
-                        # 这里预留TTS处理逻辑
-                        response.response_message.message_str += " [TTS功能待实现]"
+                    # 如果需要TTS处理
+                    if tts and response.response_message.message_str.strip():
+                        try:
+                            # 读取TTS配置
+                            if hasattr(app_config, 'tts_config') and app_config.tts_config:
+                                tts_config = app_config.tts_config
+                            else:
+                                tts_config = {
+                                    "edge-tts": {
+                                        "id": "edge_tts",
+                                        "type": "edge_tts",
+                                        "edge-tts-voice": "zh-CN-XiaoxiaoNeural"
+                                    }
+                                }
+                            
+                            # 确保edge-tts配置存在
+                            edge_tts_config = tts_config.get("edge-tts")
+                            if not edge_tts_config:
+                                edge_tts_config = {
+                                    "id": "edge_tts",
+                                    "type": "edge_tts",
+                                    "edge-tts-voice": "zh-CN-XiaoxiaoNeural"
+                                }
+                            
+                            # 创建TTS提供者
+                            tts_provider = ProviderEdgeTTS(
+                                provider_config=edge_tts_config,
+                                provider_settings={}
+                            )
+                            
+                            # 生成音频文件
+                            audio_path = await tts_provider.get_audio(response.response_message.message_str)
+                            
+                            # 将音频文件路径添加到响应中
+                            if audio_path:
+                                # 创建新的音频组件
+                                audio_component = MessageComponent(
+                                    type=MessageType.AUDIO,
+                                    content=audio_path,
+                                    extra={
+                                        "tts_model": "edge_tts",
+                                        "original_text": response.response_message.message_str[:100] + "..."
+                                    }
+                                )
+                                
+                                # 添加到响应组件中
+                                response.response_message.components.append(audio_component)
+                                
+                                # 创建包含原始响应和音频URL的字典
+                                result_dict = response.dict()
+                                # 添加音频URL到结果字典中
+                                result_dict["audio_url"] = f"/static/audio/{os.path.basename(audio_path)}"
+                                logger.info(f"TTS音频生成成功: {audio_path}")
+                                
+                                return result_dict
+                                
+                        except Exception as e:
+                            logger.error(f"TTS处理失败: {str(e)}")
+                            # 返回原始响应，不添加额外字段
                     
                     # 清理临时文件，但保留永久存储的文件
                     if temp_dir and os.path.exists(temp_dir):
@@ -294,6 +397,7 @@ async def unified_chat(
                 async def generate():
                     try:
                         count = 0
+                        full_response_text = ""  # 收集完整响应用于TTS
                         
                         async for chunk in chat_pipeline.process_message_stream(
                             model,
@@ -312,9 +416,55 @@ async def unified_chat(
                                 except Exception as e:
                                     logger.error(f"处理token信息失败: {str(e)}")
                             else:
+                                # 收集完整响应文本用于TTS
+                                full_response_text += chunk
                                 # 将普通文本块包装为SSE格式
                                 response_text = f"data: {json.dumps({'text': chunk})}\n\n"
                                 yield response_text
+                        
+                        # 如果需要TTS且有响应文本
+                        if tts and full_response_text.strip():
+                            try:
+                                # 读取TTS配置
+                                if hasattr(app_config, 'tts_config') and app_config.tts_config:
+                                    tts_config = app_config.tts_config
+                                else:
+                                    tts_config = {
+                                        "edge-tts": {
+                                            "id": "edge_tts",
+                                            "type": "edge_tts",
+                                            "edge-tts-voice": "zh-CN-XiaoxiaoNeural"
+                                        }
+                                    }
+                                
+                                # 确保edge-tts配置存在
+                                edge_tts_config = tts_config.get("edge-tts")
+                                if not edge_tts_config:
+                                    edge_tts_config = {
+                                        "id": "edge_tts",
+                                        "type": "edge_tts",
+                                        "edge-tts-voice": "zh-CN-XiaoxiaoNeural"
+                                    }
+                                
+                                # 创建TTS提供者
+                                tts_provider = ProviderEdgeTTS(
+                                    provider_config=edge_tts_config,
+                                    provider_settings={}
+                                )
+                                
+                                # 生成音频文件
+                                audio_path = await tts_provider.get_audio(full_response_text)
+                                
+                                # 构造相对URL，使前端能够访问
+                                audio_url = f"/static/audio/{os.path.basename(audio_path)}" if audio_path else None
+                                
+                                # 返回音频文件路径
+                                yield f"data: {json.dumps({'audio': audio_url})}\n\n"
+                                logger.info(f"TTS音频生成成功: {audio_path}")
+                                
+                            except Exception as e:
+                                logger.error(f"TTS处理失败: {str(e)}")
+                                yield f"data: {json.dumps({'tts_error': str(e)})}\n\n"
                         
                         # 如果没有生成任何内容
                         if count == 0:
@@ -348,10 +498,65 @@ async def unified_chat(
                         user_id
                     )
                     
-                    # 如果需要TTS处理（预留功能）
-                    if tts:
-                        # 这里预留TTS处理逻辑
-                        response.response_message.message_str += " [TTS功能待实现]"
+                    # 如果需要TTS处理
+                    if tts and response.response_message.message_str.strip():
+                        try:
+                            # 读取TTS配置
+                            if hasattr(app_config, 'tts_config') and app_config.tts_config:
+                                tts_config = app_config.tts_config
+                            else:
+                                tts_config = {
+                                    "edge-tts": {
+                                        "id": "edge_tts",
+                                        "type": "edge_tts",
+                                        "edge-tts-voice": "zh-CN-XiaoxiaoNeural"
+                                    }
+                                }
+                            
+                            # 确保edge-tts配置存在
+                            edge_tts_config = tts_config.get("edge-tts")
+                            if not edge_tts_config:
+                                edge_tts_config = {
+                                    "id": "edge_tts",
+                                    "type": "edge_tts",
+                                    "edge-tts-voice": "zh-CN-XiaoxiaoNeural"
+                                }
+                            
+                            # 创建TTS提供者
+                            tts_provider = ProviderEdgeTTS(
+                                provider_config=edge_tts_config,
+                                provider_settings={}
+                            )
+                            
+                            # 生成音频文件
+                            audio_path = await tts_provider.get_audio(response.response_message.message_str)
+                            
+                            # 将音频文件路径添加到响应中
+                            if audio_path:
+                                # 创建新的音频组件
+                                audio_component = MessageComponent(
+                                    type=MessageType.AUDIO,
+                                    content=audio_path,
+                                    extra={
+                                        "tts_model": "edge_tts",
+                                        "original_text": response.response_message.message_str[:100] + "..."
+                                    }
+                                )
+                                
+                                # 添加到响应组件中
+                                response.response_message.components.append(audio_component)
+                                
+                                # 创建包含原始响应和音频URL的字典
+                                result_dict = response.dict()
+                                # 添加音频URL到结果字典中
+                                result_dict["audio_url"] = f"/static/audio/{os.path.basename(audio_path)}"
+                                logger.info(f"TTS音频生成成功: {audio_path}")
+                                
+                                return result_dict
+                                
+                        except Exception as e:
+                            logger.error(f"TTS处理失败: {str(e)}")
+                            # 返回原始响应，不添加额外字段
                     
                     return response
                 except Exception as e:
