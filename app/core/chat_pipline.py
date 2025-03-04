@@ -1,11 +1,11 @@
-from typing import List, Dict, Optional, AsyncGenerator
+from typing import List, Dict, Optional, AsyncGenerator, Any
 import traceback
 import uuid
 from fastapi import HTTPException
 import json
 
 from app import logger
-from app.core.llm import BaseLLM, ChatMessage, LLMResponse as RawLLMResponse, OpenAILLM, AnthropicLLM, LLMConfig ,OllamaLLM
+from app.core.llm import BaseLLM, ChatMessage, LLMResponse as RawLLMResponse, OpenAILLM, AnthropicLLM, LLMConfig, OllamaLLM
 from app.core.llm.config import llm_config, MODEL_TO_ENDPOINT, DEFAULT_MODEL
 from app.core.llm.db_history import db_message_history
 from app.core.llm.message import LLMMessage, LLMResponse, MessageSender, MessageRole, MessageComponent, MessageType
@@ -53,6 +53,23 @@ class ChatPipeline:
         llm = self.llm_instances[model]
         return await llm.chat_completion(messages)
 
+    def _extract_text_from_message(self, llm_message: LLMMessage) -> str:
+        """从LLMMessage中提取纯文本内容，用于发送给LLM"""
+        # 首先尝试使用message_str
+        if llm_message.message_str and llm_message.message_str.strip():
+            return llm_message.message_str
+        
+        # 否则从组件中提取文本
+        text_parts = []
+        for component in llm_message.components:
+            if component.type == MessageType.TEXT:
+                text_parts.append(component.content)
+            elif component.type == MessageType.AUDIO and component.extra and "transcript" in component.extra:
+                # 如果是音频组件且有转写文本
+                text_parts.append(component.extra["transcript"])
+        
+        return " ".join(text_parts) if text_parts else ""
+
     async def process_message(self, model: str, message: LLMMessage, history_id: Optional[str] = None, user_id: Optional[str] = None) -> LLMResponse:
         model = model or DEFAULT_MODEL
         if model not in self.llm_instances:
@@ -68,7 +85,6 @@ class ChatPipeline:
                     message.history_id = current_history_id
                 except Exception as e:
                     error_trace = traceback.format_exc()
-                    # print(f"创建历史记录失败: {e}\n{error_trace}")
                     # 创建临时ID继续聊天
                     current_history_id = str(uuid.uuid4())
                     message.history_id = current_history_id
@@ -76,9 +92,12 @@ class ChatPipeline:
             # 为用户消息设置目标模型
             message.target_model = model
             
+            # 从消息中提取文本内容用于LLM处理
+            message_text = self._extract_text_from_message(message)
+            
             # 预先估算用户消息的token数量
             try:
-                estimated_tokens = TokenCounter.count_tokens(message.message_str, model)
+                estimated_tokens = TokenCounter.count_tokens(message_text, model)
                 message.input_tokens = estimated_tokens
             except Exception as e:
                 logger.error(f"计算用户消息token失败: {e}")
@@ -103,10 +122,13 @@ class ChatPipeline:
                         role = "assistant"
                     elif hist_msg.sender.role == MessageRole.SYSTEM:
                         role = "system"
+                    
+                    # 从消息中提取文本内容
+                    msg_text = self._extract_text_from_message(hist_msg)
                         
                     chat_messages.append(ChatMessage(
                         role=role,
-                        content=hist_msg.message_str
+                        content=msg_text
                     ))
 
             except Exception as e:
@@ -114,7 +136,7 @@ class ChatPipeline:
             
             # 如果没有历史消息，则只添加当前消息
             if not chat_messages:
-                chat_messages = [ChatMessage(role="user", content=message.message_str)]
+                chat_messages = [ChatMessage(role="user", content=message_text)]
             
             # 在调用API之前估算所有消息的token
             try:
@@ -210,9 +232,12 @@ class ChatPipeline:
             # 为用户消息设置目标模型
             message.target_model = model
             
+            # 从消息中提取文本内容用于LLM处理
+            message_text = self._extract_text_from_message(message)
+            
             # 预先估算用户消息的token数量
             try:
-                estimated_tokens = TokenCounter.count_tokens(message.message_str, model)
+                estimated_tokens = TokenCounter.count_tokens(message_text, model)
                 message.input_tokens = estimated_tokens
             except Exception as e:
                 logger.error(f"计算用户消息token失败: {e}")
@@ -236,17 +261,20 @@ class ChatPipeline:
                         role = "assistant"
                     elif hist_msg.sender.role == MessageRole.SYSTEM:
                         role = "system"
+                    
+                    # 从消息中提取文本内容
+                    msg_text = self._extract_text_from_message(hist_msg)
                         
                     chat_messages.append(ChatMessage(
                         role=role,
-                        content=hist_msg.message_str
+                        content=msg_text
                     ))
             except Exception as e:
                 logger.error(f"获取历史记录失败，只使用当前消息: {e}")
             
             # 如果没有历史消息，则只添加当前消息
             if not chat_messages:
-                chat_messages = [ChatMessage(role="user", content=message.message_str)]
+                chat_messages = [ChatMessage(role="user", content=message_text)]
             
             # 在调用API之前估算所有消息的token
             try:
@@ -257,9 +285,8 @@ class ChatPipeline:
                         "content": msg.content
                     })
                 estimated_input_tokens = TokenCounter.estimate_openai_tokens(openai_messages, model)
-                # logger.debug(f"预估输入tokens: {estimated_input_tokens}")
             except Exception as e:
-                # logger.error(f"预估输入tokens失败: {e}")
+                logger.error(f"预估输入tokens失败: {e}")
                 estimated_input_tokens = None
             
             # 流式调用LLM
@@ -302,20 +329,18 @@ class ChatPipeline:
                         message.message_id,
                         {"input_tokens": estimated_input_tokens}
                     )
-                    # logger.debug(f"更新用户消息输入tokens: {estimated_input_tokens}")
             except Exception as e:
                 logger.error(f"计算token失败: {e}")
                 
             # 将完整响应消息保存到历史记录
             try:
-                # 修改这里：不再使用返回值的属性，而使用原始消息对象
                 await db_message_history.add_message(current_history_id, response_message)
                 
-                # 将多行f-string改为先创建字典然后序列化
+                # 将token信息作为特殊消息返回
                 token_info = json.dumps({
                     'input_tokens': estimated_input_tokens,
                     'output_tokens': output_tokens,
-                    'message_id': response_message.message_id  # 使用原始消息对象的ID
+                    'message_id': response_message.message_id
                 })
                 yield f"__TOKEN_INFO__{token_info}"
             except Exception as e:

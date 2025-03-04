@@ -60,5 +60,5 @@ app.include_router(api_stt, prefix="/stt", tags=["stt 相关接口"])
 
 if __name__ == '__main__':
     logger.info(logo_tmpl)
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
     
