@@ -4,31 +4,29 @@ llm.py
 """
 
 
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Query, Request
+from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from fastapi import File, UploadFile, Form
-from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any, AsyncGenerator
-from tortoise.exceptions import DoesNotExist
+from pydantic import BaseModel
+from typing import Optional
 import traceback
 import logging
 import json
-import uuid  # 添加uuid模块导入
+import uuid
 import os
 import shutil
 import tempfile
-from pathlib import Path
 from datetime import datetime
 
 from app.core.pipeline.text_process import text_process
+from app.core.pipeline.voice_process import voice_process
 from app.core.llm.config import MODEL_TO_ENDPOINT, DEFAULT_MODEL
-from app.core.llm.message import LLMMessage, LLMResponse, MessageRole, MessageComponent, MessageType, MessageSender
+from app.core.llm.message import LLMMessage, MessageRole, MessageComponent, MessageType, MessageSender
 from app.core.llm.db_history import db_message_history
 from app.api.user import get_current_user
-from app.models.chat import ChatHistory
-from app.core.stt.openai_strategy import STTProcessor, STTStrategy
 from app import app_config
-from app.core.tts.edge_strategy import ProviderEdgeTTS  # 导入TTS处理类
+from app.core.pipeline.chat_process import chat_process
+from app.core.pipeline.summarize_process import summarize_process
 
 
 logger = logging.getLogger("app")
@@ -87,483 +85,24 @@ async def unified_chat(
     统一的聊天接口，支持文本聊天、语音聊天、流式输出等多种功能
     """
     try:
-        # 处理上传的音频文件
-        audio_file_path = None
-        permanent_audio_path = None
-        temp_dir = None
+        # 获取当前用户ID
+        user_id = str(current_user["user_id"]) if current_user else None
         
-        if stt and audio_file:
-            try:
-                # 首先使用临时目录存储上传的文件进行处理
-                temp_dir = tempfile.mkdtemp()
-                file_extension = os.path.splitext(audio_file.filename)[1]
-                audio_file_path = os.path.join(temp_dir, f"audio_{uuid.uuid4()}{file_extension}")
-                
-                # 保存上传的文件到临时位置
-                with open(audio_file_path, "wb") as buffer:
-                    shutil.copyfileobj(audio_file.file, buffer)
-                
-                # 为永久存储创建文件名（使用时间戳和UUID确保唯一性）
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"{timestamp}_{uuid.uuid4()}{file_extension}"
-                permanent_audio_path = os.path.join(AUDIO_STORAGE_DIR, filename)
-                
-                logger.info(f"音频文件临时保存至: {audio_file_path}")
-                logger.info(f"音频文件将永久保存至: {permanent_audio_path}")
-            except Exception as e:
-                logger.error(f"保存音频文件失败: {str(e)}")
-                if temp_dir and os.path.exists(temp_dir):
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                raise HTTPException(status_code=500, detail=f"保存音频文件失败: {str(e)}")
+        # 使用聊天流水线处理请求
+        return await chat_process.handle_request(
+            model=model,
+            message=message,
+            history_id=history_id,
+            role=role,
+            stream=stream,
+            stt=stt,
+            tts=tts,
+            stt_model=stt_model,
+            translate_to_english=translate_to_english,
+            audio_file=audio_file,
+            user_id=user_id
+        )
         
-        # 确保参数合法
-        model = model or DEFAULT_MODEL
-        history_id = history_id if history_id and history_id.strip() else None
-        
-        # 根据不同的参数组合选择不同的处理逻辑
-        if stt and audio_file_path:
-            # 语音转文本处理逻辑
-            # 从配置中加载STT设置
-            stt_config = app_config.stt_config
-            api_key = stt_config['whisper']['api_key']
-            
-            # 如果用户没有指定模型，则使用配置中的第一个模型
-            current_stt_model = stt_model or stt_config['whisper']['available_models'][0]
-            api_base = stt_config['whisper']['base_url']
-            
-            # 根据是否需要翻译选择策略
-            strategy = STTStrategy.TRANSLATE if translate_to_english else STTStrategy.STANDARD
-            
-            # 初始化处理器
-            processor = STTProcessor(api_key=api_key, model=current_stt_model, strategy=strategy)
-            
-            # 处理音频文件
-            try:
-                transcribed_text = processor.process(audio_file_path)
-                logger.info(f"语音转录结果: {transcribed_text}")
-            except Exception as e:
-                logger.error(f"音频转录失败: {str(e)}")
-                if temp_dir and os.path.exists(temp_dir):
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                raise HTTPException(status_code=500, detail=f"音频转录失败: {str(e)}")
-            
-            # 检查转录结果是否为空
-            if not transcribed_text.strip():
-                if temp_dir and os.path.exists(temp_dir):
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                raise HTTPException(status_code=400, detail="语音转录结果为空")
-            
-            # 在转录成功后，将文件从临时位置复制到永久位置
-            try:
-                shutil.copy2(audio_file_path, permanent_audio_path)
-                logger.info(f"音频文件已复制到永久存储位置: {permanent_audio_path}")
-            except Exception as e:
-                logger.error(f"将音频文件复制到永久位置失败: {str(e)}")
-                # 继续处理，但记录错误
-            
-            # 构造包含音频和文本的混合消息
-            # 使用相对路径或完整路径，取决于您的应用配置
-            audio_storage_path = permanent_audio_path
-            
-            # 创建音频组件和文本组件
-            audio_component = MessageComponent(
-                type=MessageType.AUDIO,
-                content=audio_storage_path,
-                extra={
-                    "transcript": transcribed_text,
-                    "model": current_stt_model,
-                    "original_filename": audio_file.filename,
-                    "duration": None  # 可以在这里添加音频时长信息，如果有的话
-                }
-            )
-            
-            text_component = MessageComponent(
-                type=MessageType.TEXT,
-                content=transcribed_text
-            )
-            
-            # 构造混合消息
-            input_message = LLMMessage(
-                history_id=history_id or "",
-                sender=MessageSender(role=role),
-                components=[audio_component, text_component],
-                message_str=transcribed_text  # 用于显示和发送给LLM的文本
-            )
-            
-            # 获取当前用户ID
-            user_id = str(current_user["user_id"]) if current_user else None
-            
-            if stream:
-                # 流式处理
-                async def generate():
-                    try:
-                        # 首先返回识别结果
-                        yield f"data: {json.dumps({'transcription': transcribed_text})}\n\n"
-                        
-                        count = 0
-                        full_response_text = ""  # 收集完整响应用于TTS
-                        
-                        async for chunk in text_process.process_message_stream(
-                            model,
-                            input_message,
-                            history_id,
-                            user_id
-                        ):
-                            count += 1
-                            
-                            # 检查是否是token信息特殊标记
-                            if chunk.startswith("__TOKEN_INFO__"):
-                                try:
-                                    token_data = json.loads(chunk[14:])  # 去掉特殊前缀
-                                    token_response = f"data: {json.dumps({'token_info': token_data})}\n\n"
-                                    yield token_response
-                                except Exception as e:
-                                    logger.error(f"处理token信息失败: {str(e)}")
-                            else:
-                                # 收集完整响应文本用于TTS
-                                full_response_text += chunk
-                                # 将普通文本块包装为SSE格式
-                                response_text = f"data: {json.dumps({'text': chunk})}\n\n"
-                                yield response_text
-                        
-                        # 如果需要TTS且有响应文本
-                        if tts and full_response_text.strip():
-                            try:
-                                # 读取TTS配置
-                                if hasattr(app_config, 'tts_config') and app_config.tts_config:
-                                    tts_config = app_config.tts_config
-                                else:
-                                    tts_config = {
-                                        "edge-tts": {
-                                            "id": "edge_tts",
-                                            "type": "edge_tts",
-                                            "edge-tts-voice": "zh-CN-XiaoxiaoNeural"
-                                        }
-                                    }
-                                
-                                # 确保edge-tts配置存在
-                                edge_tts_config = tts_config.get("edge-tts")
-                                if not edge_tts_config:
-                                    edge_tts_config = {
-                                        "id": "edge_tts",
-                                        "type": "edge_tts",
-                                        "edge-tts-voice": "zh-CN-XiaoxiaoNeural"
-                                    }
-                                
-                                # 创建TTS提供者
-                                tts_provider = ProviderEdgeTTS(
-                                    provider_config=edge_tts_config,
-                                    provider_settings={}
-                                )
-                                
-                                # 生成音频文件
-                                audio_path = await tts_provider.get_audio(full_response_text)
-                                
-                                # 构造相对URL，使前端能够访问
-                                audio_url = f"/static/audio/{os.path.basename(audio_path)}" if audio_path else None
-                                
-                                # 返回音频文件路径
-                                yield f"data: {json.dumps({'audio': audio_url})}\n\n"
-                                logger.info(f"TTS音频生成成功: {audio_path}")
-                                
-                            except Exception as e:
-                                logger.error(f"TTS处理失败: {str(e)}")
-                                yield f"data: {json.dumps({'tts_error': str(e)})}\n\n"
-                        
-                        # 如果没有生成任何内容
-                        if count == 0:
-                            yield f"data: {json.dumps({'text': '未能生成响应'})}\n\n"
-                    except Exception as e:
-                        error_trace = traceback.format_exc()
-                        logger.error(f"流式处理失败: {str(e)}\n{error_trace}")
-                        yield f"data: {json.dumps({'error': str(e)})}\n\n"
-                    finally:
-                        # 标记流结束
-                        yield "data: [DONE]\n\n"
-                        # 只删除临时目录，不删除永久存储的文件
-                        if temp_dir and os.path.exists(temp_dir):
-                            shutil.rmtree(temp_dir, ignore_errors=True)
-                
-                # 确保设置正确的 SSE 响应头
-                return StreamingResponse(
-                    generate(),
-                    media_type="text/event-stream",
-                    headers={
-                        "Cache-Control": "no-cache",
-                        "Connection": "keep-alive",
-                        "X-Accel-Buffering": "no", 
-                        "Content-Type": "text/event-stream"
-                    }
-                )
-            else:
-                # 非流式处理
-                try:
-                    response = await text_process.process_message(
-                        model,
-                        input_message,
-                        history_id,
-                        user_id
-                    )
-                    
-                    # 如果需要TTS处理
-                    if tts and response.response_message.message_str.strip():
-                        try:
-                            # 读取TTS配置
-                            if hasattr(app_config, 'tts_config') and app_config.tts_config:
-                                tts_config = app_config.tts_config
-                            else:
-                                tts_config = {
-                                    "edge-tts": {
-                                        "id": "edge_tts",
-                                        "type": "edge_tts",
-                                        "edge-tts-voice": "zh-CN-XiaoxiaoNeural"
-                                    }
-                                }
-                            
-                            # 确保edge-tts配置存在
-                            edge_tts_config = tts_config.get("edge-tts")
-                            if not edge_tts_config:
-                                edge_tts_config = {
-                                    "id": "edge_tts",
-                                    "type": "edge_tts",
-                                    "edge-tts-voice": "zh-CN-XiaoxiaoNeural"
-                                }
-                            
-                            # 创建TTS提供者
-                            tts_provider = ProviderEdgeTTS(
-                                provider_config=edge_tts_config,
-                                provider_settings={}
-                            )
-                            
-                            # 生成音频文件
-                            audio_path = await tts_provider.get_audio(response.response_message.message_str)
-                            
-                            # 将音频文件路径添加到响应中
-                            if audio_path:
-                                # 创建新的音频组件
-                                audio_component = MessageComponent(
-                                    type=MessageType.AUDIO,
-                                    content=audio_path,
-                                    extra={
-                                        "tts_model": "edge_tts",
-                                        "original_text": response.response_message.message_str[:100] + "..."
-                                    }
-                                )
-                                
-                                # 添加到响应组件中
-                                response.response_message.components.append(audio_component)
-                                
-                                # 创建包含原始响应和音频URL的字典
-                                result_dict = response.dict()
-                                # 添加音频URL到结果字典中
-                                result_dict["audio_url"] = f"/static/audio/{os.path.basename(audio_path)}"
-                                logger.info(f"TTS音频生成成功: {audio_path}")
-                                
-                                return result_dict
-                                
-                        except Exception as e:
-                            logger.error(f"TTS处理失败: {str(e)}")
-                            # 返回原始响应，不添加额外字段
-                    
-                    # 清理临时文件，但保留永久存储的文件
-                    if temp_dir and os.path.exists(temp_dir):
-                        shutil.rmtree(temp_dir, ignore_errors=True)
-                    
-                    return response
-                except Exception as e:
-                    error_trace = traceback.format_exc()
-                    logger.error(f"处理消息失败: {str(e)}\n{error_trace}")
-                    # 清理临时文件
-                    if temp_dir and os.path.exists(temp_dir):
-                        shutil.rmtree(temp_dir, ignore_errors=True)
-                    raise HTTPException(status_code=500, detail=f"处理消息失败: {str(e)}")
-        else:
-            # 纯文本处理逻辑
-            if not message or not message.strip():
-                raise HTTPException(status_code=400, detail="消息内容不能为空")
-            
-            # 构造输入消息
-            input_message = LLMMessage.from_text(
-                text=message,
-                history_id=history_id or "",
-                role=role
-            )
-            
-            # 获取当前用户ID
-            user_id = str(current_user["user_id"]) if current_user else None
-            
-            if stream:
-                # 流式处理
-                async def generate():
-                    try:
-                        count = 0
-                        full_response_text = ""  # 收集完整响应用于TTS
-                        
-                        async for chunk in text_process.process_message_stream(
-                            model,
-                            input_message,
-                            history_id,
-                            user_id
-                        ):
-                            count += 1
-                            
-                            # 检查是否是token信息特殊标记
-                            if chunk.startswith("__TOKEN_INFO__"):
-                                try:
-                                    token_data = json.loads(chunk[14:])  # 去掉特殊前缀
-                                    token_response = f"data: {json.dumps({'token_info': token_data})}\n\n"
-                                    yield token_response
-                                except Exception as e:
-                                    logger.error(f"处理token信息失败: {str(e)}")
-                            else:
-                                # 收集完整响应文本用于TTS
-                                full_response_text += chunk
-                                # 将普通文本块包装为SSE格式
-                                response_text = f"data: {json.dumps({'text': chunk})}\n\n"
-                                yield response_text
-                        
-                        # 如果需要TTS且有响应文本
-                        if tts and full_response_text.strip():
-                            try:
-                                # 读取TTS配置
-                                if hasattr(app_config, 'tts_config') and app_config.tts_config:
-                                    tts_config = app_config.tts_config
-                                else:
-                                    tts_config = {
-                                        "edge-tts": {
-                                            "id": "edge_tts",
-                                            "type": "edge_tts",
-                                            "edge-tts-voice": "zh-CN-XiaoxiaoNeural"
-                                        }
-                                    }
-                                
-                                # 确保edge-tts配置存在
-                                edge_tts_config = tts_config.get("edge-tts")
-                                if not edge_tts_config:
-                                    edge_tts_config = {
-                                        "id": "edge_tts",
-                                        "type": "edge_tts",
-                                        "edge-tts-voice": "zh-CN-XiaoxiaoNeural"
-                                    }
-                                
-                                # 创建TTS提供者
-                                tts_provider = ProviderEdgeTTS(
-                                    provider_config=edge_tts_config,
-                                    provider_settings={}
-                                )
-                                
-                                # 生成音频文件
-                                audio_path = await tts_provider.get_audio(full_response_text)
-                                
-                                # 构造相对URL，使前端能够访问
-                                audio_url = f"/static/audio/{os.path.basename(audio_path)}" if audio_path else None
-                                
-                                # 返回音频文件路径
-                                yield f"data: {json.dumps({'audio': audio_url})}\n\n"
-                                logger.info(f"TTS音频生成成功: {audio_path}")
-                                
-                            except Exception as e:
-                                logger.error(f"TTS处理失败: {str(e)}")
-                                yield f"data: {json.dumps({'tts_error': str(e)})}\n\n"
-                        
-                        # 如果没有生成任何内容
-                        if count == 0:
-                            yield f"data: {json.dumps({'text': '未能生成响应'})}\n\n"
-                    except Exception as e:
-                        error_trace = traceback.format_exc()
-                        logger.error(f"流式处理失败: {str(e)}\n{error_trace}")
-                        yield f"data: {json.dumps({'error': str(e)})}\n\n"
-                    finally:
-                        # 标记流结束
-                        yield "data: [DONE]\n\n"
-                
-                # 确保设置正确的 SSE 响应头
-                return StreamingResponse(
-                    generate(),
-                    media_type="text/event-stream",
-                    headers={
-                        "Cache-Control": "no-cache",
-                        "Connection": "keep-alive",
-                        "X-Accel-Buffering": "no", 
-                        "Content-Type": "text/event-stream"
-                    }
-                )
-            else:
-                # 非流式处理
-                try:
-                    response = await text_process.process_message(
-                        model,
-                        input_message,
-                        history_id,
-                        user_id
-                    )
-                    
-                    # 如果需要TTS处理
-                    if tts and response.response_message.message_str.strip():
-                        try:
-                            # 读取TTS配置
-                            if hasattr(app_config, 'tts_config') and app_config.tts_config:
-                                tts_config = app_config.tts_config
-                            else:
-                                tts_config = {
-                                    "edge-tts": {
-                                        "id": "edge_tts",
-                                        "type": "edge_tts",
-                                        "edge-tts-voice": "zh-CN-XiaoxiaoNeural"
-                                    }
-                                }
-                            
-                            # 确保edge-tts配置存在
-                            edge_tts_config = tts_config.get("edge-tts")
-                            if not edge_tts_config:
-                                edge_tts_config = {
-                                    "id": "edge_tts",
-                                    "type": "edge_tts",
-                                    "edge-tts-voice": "zh-CN-XiaoxiaoNeural"
-                                }
-                            
-                            # 创建TTS提供者
-                            tts_provider = ProviderEdgeTTS(
-                                provider_config=edge_tts_config,
-                                provider_settings={}
-                            )
-                            
-                            # 生成音频文件
-                            audio_path = await tts_provider.get_audio(response.response_message.message_str)
-                            
-                            # 将音频文件路径添加到响应中
-                            if audio_path:
-                                # 创建新的音频组件
-                                audio_component = MessageComponent(
-                                    type=MessageType.AUDIO,
-                                    content=audio_path,
-                                    extra={
-                                        "tts_model": "edge_tts",
-                                        "original_text": response.response_message.message_str[:100] + "..."
-                                    }
-                                )
-                                
-                                # 添加到响应组件中
-                                response.response_message.components.append(audio_component)
-                                
-                                # 创建包含原始响应和音频URL的字典
-                                result_dict = response.dict()
-                                # 添加音频URL到结果字典中
-                                result_dict["audio_url"] = f"/static/audio/{os.path.basename(audio_path)}"
-                                logger.info(f"TTS音频生成成功: {audio_path}")
-                                
-                                return result_dict
-                                
-                        except Exception as e:
-                            logger.error(f"TTS处理失败: {str(e)}")
-                            # 返回原始响应，不添加额外字段
-                    
-                    return response
-                except Exception as e:
-                    error_trace = traceback.format_exc()
-                    logger.error(f"处理消息失败: {str(e)}\n{error_trace}")
-                    raise HTTPException(status_code=500, detail=f"处理消息失败: {str(e)}")
-            
     except HTTPException:
         raise
     except Exception as e:
@@ -677,77 +216,13 @@ async def update_history_title(history_id: str, request: HistoryUpdateRequest, c
 async def summarize_history_title(history_id: str, current_user=Depends(get_current_user)):
     """自动总结历史记录内容并更新标题"""
     try:
-        # 获取历史记录
-        try:
-            messages = await db_message_history.get_history(history_id)
-            if not messages or len(messages) == 0:
-                raise HTTPException(status_code=400, detail="历史记录为空，无法总结")
-        except Exception as e:
-            logger.error(f"获取历史记录失败: {e}")
-            raise HTTPException(status_code=404, detail=f"获取历史记录失败: {str(e)}")
+        user_id = str(current_user["user_id"]) if current_user else None
         
-        # 准备提示信息
-        prompt = "请根据以下对话内容，生成一个10个字以内的简短标题，只返回标题文本，不要有任何解释或额外文字：\n\n"
-        
-        # 添加最多5条消息以避免过长
-        message_count = min(len(messages), 5)
-        for i in range(message_count):
-            msg = messages[-(message_count-i)]  # 获取最近的几条消息
-            role_text = "用户" if msg.sender.role == MessageRole.USER else "AI"
-            prompt += f"{role_text}: {msg.message_str[:100]}{'...' if len(msg.message_str) > 100 else ''}\n"
-        
-        # 构造消息请求
-        input_message = LLMMessage.from_text(
-            text=prompt,
-            history_id="",  # 空字符串，让API自动创建新历史记录
-            role=MessageRole.USER
+        # 使用摘要流水线处理请求
+        return await summarize_process.generate_history_title(
+            history_id=history_id,
+            user_id=user_id
         )
-        
-        # 生成临时历史ID用于后续清理
-        temp_history_id = None
-        
-        # 调用 gpt-3.5-turbo 模型生成标题
-        summary_model = "gpt-3.5-turbo"
-        response = await text_process.process_message(
-            summary_model,
-            input_message
-        )
-        
-        # 从响应中获取自动生成的历史ID
-        if response and response.response_message and response.response_message.history_id:
-            temp_history_id = response.response_message.history_id
-            logger.info(f"发现临时历史ID: {temp_history_id}")
-        
-        # 提取生成的标题并清理
-        title = response.response_message.message_str.strip()
-        
-        # 移除引号和额外的标点符号
-        title = title.strip('"\'「」『』【】《》（）()[]').strip()
-        
-        # 限制长度
-        if len(title) > 20:  # 给一点缓冲空间
-            title = title[:20]
-            
-        logger.info(f"生成的标题: {title}")
-        
-        # 删除临时历史记录
-        if temp_history_id:
-            try:
-                await db_message_history.delete_history(temp_history_id)
-                logger.info(f"已删除临时历史记录: {temp_history_id}")
-            except Exception as e:
-                logger.warning(f"删除临时历史记录失败: {e}")
-        
-        # 调用更新API
-        success = await db_message_history.update_history_title(history_id, title)
-        if not success:
-            raise HTTPException(status_code=500, detail="更新历史记录标题失败")
-            
-        return {
-            "success": True,
-            "history_id": history_id,
-            "new_title": title
-        }
         
     except HTTPException:
         raise

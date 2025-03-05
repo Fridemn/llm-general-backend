@@ -9,6 +9,7 @@ import base64
 from pathlib import Path
 import asyncio
 from . import STTProvider
+import openai
 
 # 设置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -47,7 +48,7 @@ class STTProcessor:
             strategy: 转录策略
         """
         # 使用传入的api_key参数，而不是硬编码的值
-        self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
+        self.api_key = ""
         if not self.api_key:
             raise ValueError("API key must be provided or set as environment variable OPENAI_API_KEY")
         
@@ -242,7 +243,16 @@ def base64_to_audio(base64_string: str) -> bytes:
 
 
 class ProviderOpenAISTT(STTProvider):
+    """OpenAI Whisper STT提供者实现"""
+    
     def __init__(self, provider_config: dict, provider_settings: dict) -> None:
+        """
+        初始化OpenAI STT提供者
+        
+        Args:
+            provider_config: 提供者配置
+            provider_settings: 全局设置
+        """
         super().__init__(provider_config, provider_settings)
         
         # 从配置中获取API密钥和基础URL
@@ -258,18 +268,49 @@ class ProviderOpenAISTT(STTProvider):
             model=model,
             strategy=strategy
         )
-        
-        self.set_model("openai_stt")
     
-    async def process_audio(self, audio_file: Union[str, Path, BinaryIO], return_full_response: bool = False, **kwargs) -> Union[str, Dict[str, Any]]:
-        """异步处理音频文件，将处理委托给内部的STTProcessor实例"""
-        # 使用run_in_executor来异步运行同步代码
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            None, 
-            lambda: self.processor.process(
-                audio_file, 
-                return_full_response=return_full_response, 
-                **kwargs
+    async def transcribe(self, audio_file: str, **kwargs) -> str:
+        """
+        转录音频文件
+        
+        Args:
+            audio_file: 音频文件路径
+            **kwargs: 额外参数
+                - model: 可选，要使用的模型名称
+                - translate_to_english: 布尔值，是否将音频翻译为英文
+                
+        Returns:
+            转录文本
+        """
+        try:
+            # 提取转录选项
+            translate_to_english = kwargs.pop("translate_to_english", False)
+            model = kwargs.pop("model", None)
+            
+            # 如果指定了模型，设置到处理器
+            if model:
+                self.processor.model = model
+                
+            # 设置策略
+            if translate_to_english:
+                self.processor.strategy = STTStrategy.TRANSLATE
+            else:
+                self.processor.strategy = STTStrategy.STANDARD
+                
+            # 使用 asyncio 将同步操作放入线程池
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: self.processor.process(audio_file, **kwargs)
             )
-        )
+            
+            if isinstance(result, str):
+                return result
+            elif isinstance(result, dict) and "text" in result:
+                return result["text"]
+            else:
+                return str(result)
+                
+        except Exception as e:
+            logger.error(f"转录失败: {str(e)}")
+            raise

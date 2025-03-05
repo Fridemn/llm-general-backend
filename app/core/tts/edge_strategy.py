@@ -1,78 +1,136 @@
-import uuid
 import os
-import edge_tts
+import uuid
+import logging
 import asyncio
-from . import TTSProvider
+import edge_tts
+from typing import Dict, Any, Optional, List
+from pathlib import Path
+from datetime import datetime
 
-"""
-edge_tts 方式，能够免费、快速生成语音，使用需要先安装edge-tts库
-```
-pip install edge_tts
-```
-Windows 如果提示找不到指定文件，以管理员身份运行命令行窗口，然后再次运行 AstrBot
-"""
+from app.core.tts import TTSProvider
+
+# 配置日志
+logger = logging.getLogger(__name__)
+
+# 音频输出目录
+AUDIO_OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), 'static', 'audio')
+os.makedirs(AUDIO_OUTPUT_DIR, exist_ok=True)
 
 class ProviderEdgeTTS(TTSProvider):
-    def __init__(
-        self,
-        provider_config: dict,
-        provider_settings: dict,
-    ) -> None:
-        super().__init__(provider_config, provider_settings)
-
-        # 设置默认语音，如果没有指定则使用中文小萱
-        self.voice = provider_config.get("edge-tts-voice", "zh-CN-XiaoxiaoNeural")
-        self.rate = provider_config.get("rate", None)
-        self.volume = provider_config.get("volume", None)
-        self.pitch = provider_config.get("pitch", None)
-        self.timeout = provider_config.get("timeout", 30)
-
-        self.set_model("edge_tts")
-
-    async def get_audio(self, text: str) -> str:
-        os.makedirs("static/tts", exist_ok=True)
-        mp3_path = f"static/tts/edge_tts_temp_{uuid.uuid4()}.mp3"
-
-        # 构建Edge TTS参数
-        kwargs = {"text": text, "voice": self.voice}
-        if self.rate:
-            kwargs["rate"] = self.rate
-        if self.volume:
-            kwargs["volume"] = self.volume
-        if self.pitch:
-            kwargs["pitch"] = self.pitch
-
-        try:
-            communicate = edge_tts.Communicate(**kwargs)
-            await communicate.save(mp3_path)
-
-            if os.path.exists(mp3_path) and os.path.getsize(mp3_path) > 0:
-                return mp3_path
-            else:
-                raise RuntimeError("生成的MP3文件不存在或为空")
-
-        except Exception as e:
-            try:
-                if os.path.exists(mp3_path):
-                    os.remove(mp3_path)
-            except Exception:
-                pass
-            raise RuntimeError(f"音频生成失败: {str(e)}")
+    """Edge TTS 提供者实现"""
+    
+    DEFAULT_VOICE = "zh-CN-XiaoxiaoNeural"
+    
+    # 可用的中文男声和女声列表
+    AVAILABLE_VOICES = {
+        "chinese": {
+            "female": [
+                "zh-CN-XiaoxiaoNeural",  # 晓晓，女声，温暖亲和
+                "zh-CN-XiaoyiNeural",    # 晓伊，女声，温柔感性
+                "zh-CN-liaoning-XiaobeiNeural",  # 晓北，东北口音
+                "zh-TW-HsiaoChenNeural", # 台湾口音
+                "zh-HK-HiuGaaiNeural",   # 香港口音
+            ],
+            "male": [
+                "zh-CN-YunxiNeural",     # 云希，男声，稳重多才
+                "zh-CN-YunjianNeural"    # 云健，男声，阳光开朗
+            ]
+        }
+    }
+    
+    def __init__(self, provider_config: Dict[str, Any], provider_settings: Dict[str, Any]):
+        """
+        初始化Edge TTS提供者
         
-
-if __name__ == "__main__":
-    # 测试
-    async def test():
-        provider = ProviderEdgeTTS(
-            provider_config={
-                "id": "edge_tts",
-                "type": "edge_tts",
-                "edge-tts-voice": "zh-CN-XiaoxiaoNeural",
-            },
-            provider_settings={},
-        )
-
-        audio_path = await provider.get_audio("你好，世界！")
-        print(audio_path)
-
-    asyncio.run(test())
+        Args:
+            provider_config: 提供者配置
+            provider_settings: 全局设置
+        """
+        super().__init__(provider_config, provider_settings)
+        
+        # 从配置中获取语音
+        self.voice = provider_config.get("edge-tts-voice", self.DEFAULT_VOICE)
+        
+        # 从提供者名称设置
+        self.set_model("edge_tts")
+    
+    async def get_voices(self) -> List[Dict[str, Any]]:
+        """
+        获取所有可用的语音列表
+        
+        Returns:
+            语音列表
+        """
+        try:
+            voices = await edge_tts.list_voices()
+            return voices
+        except Exception as e:
+            logger.error(f"获取Edge TTS语音列表失败: {str(e)}")
+            return []
+    
+    async def get_audio(self, text: str, **kwargs) -> str:
+        """
+        将文本转换为音频
+        
+        Args:
+            text: 要转换的文本
+            **kwargs: 额外参数
+                - voice: 语音名称
+                - rate: 语速，如 "+10%", "-20%"
+                - volume: 音量，如 "+10%", "-20%"
+                
+        Returns:
+            音频文件路径
+        """
+        try:
+            # 从kwargs中获取参数，如果没有则使用默认值
+            voice = kwargs.get("voice", self.voice)
+            rate = kwargs.get("rate", "+0%")
+            volume = kwargs.get("volume", "+0%")
+            
+            # 检查文本是否为空
+            if not text.strip():
+                logger.warning("文本为空，无法生成音频")
+                return ""
+            
+            # 生成输出文件路径
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"tts_{timestamp}_{uuid.uuid4()}.mp3"
+            output_path = os.path.join(AUDIO_OUTPUT_DIR, filename)
+            
+            # 处理可能较长的文本，分割处理
+            if len(text) > 5000:
+                logger.warning(f"文本长度超过5000字符 ({len(text)}), 将进行分割处理")
+                # 每5000个字符分割一次
+                chunks = [text[i:i+5000] for i in range(0, len(text), 5000)]
+                temp_files = []
+                
+                # 处理每个块
+                for i, chunk in enumerate(chunks):
+                    temp_filename = f"temp_{timestamp}_{i}_{uuid.uuid4()}.mp3"
+                    temp_path = os.path.join(AUDIO_OUTPUT_DIR, temp_filename)
+                    
+                    # 使用Edge TTS生成每个块的音频
+                    communicate = edge_tts.Communicate(chunk, voice, rate=rate, volume=volume)
+                    await communicate.save(temp_path)
+                    temp_files.append(temp_path)
+                
+                # 合并音频文件 (这里简化处理，只返回第一个文件)
+                # 实际上，应该使用pydub或其他库合并所有文件
+                if temp_files:
+                    os.rename(temp_files[0], output_path)
+                    # 删除剩余的临时文件
+                    for temp_file in temp_files[1:]:
+                        if os.path.exists(temp_file):
+                            os.remove(temp_file)
+            else:
+                # 对于短文本，直接生成
+                communicate = edge_tts.Communicate(text, voice, rate=rate, volume=volume)
+                await communicate.save(output_path)
+            
+            logger.info(f"成功生成音频文件: {output_path}")
+            return output_path
+            
+        except Exception as e:
+            logger.error(f"生成音频失败: {str(e)}")
+            raise

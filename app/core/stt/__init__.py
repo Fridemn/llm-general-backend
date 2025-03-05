@@ -1,15 +1,32 @@
-import abc
-from typing import Union, Dict, Any, BinaryIO
-from pathlib import Path
-from app.core.provider import AbstractProvider
+from abc import ABC, abstractmethod
+from typing import Dict, Any, Optional
 
-class STTProvider(AbstractProvider):
-    def __init__(self, provider_config: dict, provider_settings: dict) -> None:
-        super().__init__(provider_config)
+
+class STTProvider(ABC):
+    """STT (语音转文本) 提供者抽象基类"""
+    
+    def __init__(self, provider_config: Dict[str, Any], provider_settings: Dict[str, Any]):
+        """
+        初始化STT提供者
+        
+        Args:
+            provider_config: 提供者配置
+            provider_settings: 全局设置
+        """
         self.provider_config = provider_config
         self.provider_settings = provider_settings
-
-    @abc.abstractmethod
-    async def process_audio(self, audio_file: Union[str, Path, BinaryIO], return_full_response: bool = False, **kwargs) -> Union[str, Dict[str, Any]]:
-        """处理音频文件，返回转换后的文本或完整响应"""
-        raise NotImplementedError()
+        self.provider_name = provider_config.get("id", "unknown")
+    
+    @abstractmethod
+    async def transcribe(self, audio_file: str, **kwargs) -> str:
+        """
+        转录音频文件
+        
+        Args:
+            audio_file: 音频文件路径
+            **kwargs: 额外参数，如模型名称、翻译选项等
+        
+        Returns:
+            转录文本
+        """
+        pass
