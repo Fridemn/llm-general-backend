@@ -54,11 +54,20 @@ DEFAULT_CONFIG={
         "sign_name": sign_name,
     },
     "stt_config": {
-        "whisper": {
+        "active": "openai",
+        "openai": {
+            "type": "openai",
             "api_key": api_key,
             "base_url": base_url,
-            "available_models": ["whisper-1"]
+            "model": "whisper-1"
         },
+    },
+    "tts_config": {
+        "active": "edge",
+        "edge": {
+        "type": "edge",
+        "edge-tts-voice": "zh-CN-XiaoxiaoNeural"
+        }
     },
     "llm_config": {
     "endpoints": {

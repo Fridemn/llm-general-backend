@@ -1,18 +1,18 @@
-from typing import Optional, Dict, Any, AsyncGenerator, Union
-import logging
 import os
 import json
+import logging
 import traceback
 
+from typing import Optional, Dict, Any, Union
 from fastapi import UploadFile, HTTPException
 from fastapi.responses import StreamingResponse
 
+from app import app_config, logger
 from app.core.pipeline.text_process import text_process
 from app.core.pipeline.voice_process import voice_process
 from app.core.llm.message import LLMMessage, LLMResponse, MessageRole, MessageComponent, MessageSender, MessageType
-from app.core.llm.config import DEFAULT_MODEL
 
-logger = logging.getLogger("app")
+DEFAULT_MODEL = app_config.llm_config['default_model']
 
 class ChatProcess:
     """

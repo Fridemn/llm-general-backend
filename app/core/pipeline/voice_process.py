@@ -1,16 +1,15 @@
-from typing import Optional, Dict, Any
 import os
 import uuid
 import shutil
-import tempfile
 import logging
+import tempfile
 from datetime import datetime
+from typing import Optional, Dict, Any
 
+from app import logger
 from app.core.stt.stt_factory import STTFactory
 from app.core.tts.tts_factory import TTSFactory
 from app.core.llm.message import MessageComponent, MessageType
-
-logger = logging.getLogger("app")
 
 # 创建音频文件存储目录
 AUDIO_STORAGE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), 'static', 'audio')

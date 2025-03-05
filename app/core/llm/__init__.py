@@ -1,9 +1,8 @@
-from typing import List, Optional, Dict, Any, AsyncGenerator
-import aiohttp
-from pydantic import BaseModel
-import traceback
-import sys
 import json
+import aiohttp
+import traceback
+from pydantic import BaseModel
+from typing import List, Optional, Dict, Any, AsyncGenerator
 
 from app import logger
 

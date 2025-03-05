@@ -1,14 +1,10 @@
-import os
-from pathlib import Path
-from typing import Optional, Dict, Type
 import logging
+from typing import Optional, Dict, Type
 
-from app.core.strategy_selector import StrategySelector
+from app import app_config, logger
 from app.core.tts import TTSProvider
 from app.core.tts.edge_strategy import ProviderEdgeTTS
-
-# 配置日志
-logger = logging.getLogger(__name__)
+from app.core.strategy_selector import StrategySelector
 
 class TTSFactory:
     """TTS 工厂类，负责创建 TTS 提供者实例"""
@@ -19,26 +15,19 @@ class TTSFactory:
     }
     
     @staticmethod
-    def create_provider(config_path: Optional[str] = None) -> Optional[TTSProvider]:
+    def create_provider() -> Optional[TTSProvider]:
         """
         创建 TTS 提供者实例
         
-        Args:
-            config_path: 配置文件路径，默认为data/strategy_config.json
-            
         Returns:
             TTSProvider 实例，如果没有找到活跃策略则返回None
         """
         try:
-            if config_path is None:
-                # 尝试确定config_path的位置
-                base_dir = Path(__file__).parent.parent.parent.parent  # 项目根目录
-                config_path = os.path.join(base_dir, "data", "strategy_config.json")
-                
-            logger.info(f"使用TTS配置文件: {config_path}")
-                
-            # 创建选择器
-            selector = StrategySelector[TTSProvider](config_path, "tts")
+            # 使用app_config直接获取TTS配置
+            # logger.info(f"使用app_config中的TTS配置")
+            
+            # 创建选择器，传入活跃策略名称和完整配置
+            selector = StrategySelector[TTSProvider](app_config.tts_config["active"], app_config.tts_config)
             
             # 获取活跃策略
             active_strategy = selector.get_active_strategy()

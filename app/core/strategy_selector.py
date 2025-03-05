@@ -1,10 +1,9 @@
 import os
 import json
-import logging
 from typing import Dict, Any, Optional, TypeVar, Generic, Type
 
-# 配置日志
-logger = logging.getLogger(__name__)
+from app import logger
+
 
 # 定义泛型类型变量
 T = TypeVar('T')
@@ -16,18 +15,26 @@ class StrategySelector(Generic[T]):
     泛型参数 T 代表策略提供者的类型
     """
     
-    def __init__(self, config_path: str, config_type: str):
+    def __init__(self, config_path_or_active: str, config_type_or_config: str = None):
         """
         初始化策略选择器
         
         Args:
-            config_path: 配置文件路径
-            config_type: 配置类型，如 'tts', 'stt'
+            config_path_or_active: 配置文件路径或活跃策略名称
+            config_type_or_config: 配置类型(如 'tts', 'stt')或配置对象
         """
-        self.config_path = config_path
-        self.config_type = config_type
-        self.config = self._load_config()
-        logger.info(f"已加载{self.config_type}配置: {self.config}")
+        # 根据第二个参数类型判断初始化方式
+        if isinstance(config_type_or_config, dict):
+            # 直接使用配置对象
+            self.config = config_type_or_config
+            self.config_type = "direct"
+            # logger.info(f"使用直接配置初始化策略选择器，活跃策略: {config_path_or_active}")
+        else:
+            # 从文件加载配置
+            self.config_path = config_path_or_active
+            self.config_type = config_type_or_config
+            self.config = self._load_config()
+            # logger.info(f"已加载{self.config_type}配置: {self.config}")
         
     def _load_config(self) -> Dict[str, Any]:
         """
@@ -38,47 +45,21 @@ class StrategySelector(Generic[T]):
         """
         try:
             if not os.path.exists(self.config_path):
-                logger.warning(f"配置文件不存在: {self.config_path}, 使用默认配置")
-                return self._get_default_config()
+                # logger.error(f"配置文件不存在: {self.config_path}")
+                return {}
                 
             with open(self.config_path, 'r', encoding='utf-8') as f:
                 config = json.load(f)
                 
             # 检查配置是否包含指定类型
             if self.config_type not in config:
-                logger.warning(f"配置文件中不存在{self.config_type}配置, 使用默认配置")
-                return self._get_default_config()
+                # logger.error(f"配置文件中不存在{self.config_type}配置")
+                return {}
                 
             return config[self.config_type]
         except Exception as e:
-            logger.error(f"加载配置文件失败: {str(e)}, 使用默认配置")
-            return self._get_default_config()
-            
-    def _get_default_config(self) -> Dict[str, Any]:
-        """
-        获取默认配置
-        
-        Returns:
-            默认配置字典
-        """
-        if self.config_type == "tts":
-            return {
-                "active": "edge",
-                "edge": {
-                    "type": "edge",
-                    "edge-tts-voice": "zh-CN-XiaoxiaoNeural"
-                }
-            }
-        elif self.config_type == "stt":
-            return {
-                "active": "openai",
-                "openai": {
-                    "type": "openai",
-                    "model": "whisper-1"
-                }
-            }
-        else:
-            return {"active": None}
+            logger.error(f"加载配置文件失败: {str(e)}")
+            return {}
             
     def get_active_strategy(self) -> Optional[str]:
         """
@@ -88,7 +69,7 @@ class StrategySelector(Generic[T]):
             活跃策略名称，如果不存在则返回None
         """
         active = self.config.get("active")
-        logger.info(f"{self.config_type}活跃策略: {active}")
+        # logger.info(f"{self.config_type}活跃策略: {active}")
         return active
         
     def get_strategy_config(self, strategy_name: Optional[str] = None) -> Dict[str, Any]:
@@ -103,15 +84,15 @@ class StrategySelector(Generic[T]):
         """
         name = strategy_name or self.get_active_strategy()
         if not name:
-            logger.error(f"未指定{self.config_type}策略名称")
+            # logger.error(f"未指定{self.config_type}策略名称")
             return {}
             
         if name not in self.config:
-            logger.error(f"{self.config_type}配置中未找到策略: {name}")
+            # logger.error(f"{self.config_type}配置中未找到策略: {name}")
             return {}
             
         strategy_config = self.config.get(name, {})
-        logger.info(f"{self.config_type}策略{name}配置: {strategy_config}")
+        # logger.info(f"{self.config_type}策略{name}配置: {strategy_config}")
         return strategy_config
         
     def create_provider(self, provider_map: Dict[str, Type[T]], provider_config: Dict[str, Any]) -> Optional[T]:
@@ -146,10 +127,11 @@ class StrategySelector(Generic[T]):
             merged_config["type"] = strategy_name  # 确保type字段存在
             
             # 创建提供者实例
-            logger.info(f"创建{self.config_type}提供者: {strategy_name}, 配置: {merged_config}")
+            # logger.info(f"创建{self.config_type}提供者: {strategy_name}, 配置: {merged_config}")
             provider = provider_class(merged_config, {})
             return provider
             
         except Exception as e:
             logger.error(f"创建{self.config_type}提供者失败: {str(e)}")
             return None
+

@@ -1,16 +1,12 @@
 import os
 import uuid
 import logging
-import asyncio
 import edge_tts
-from typing import Dict, Any, Optional, List
-from pathlib import Path
 from datetime import datetime
+from typing import Dict, Any, List
 
+from app import logger
 from app.core.tts import TTSProvider
-
-# 配置日志
-logger = logging.getLogger(__name__)
 
 # 音频输出目录
 AUDIO_OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), 'static', 'audio')
@@ -128,7 +124,7 @@ class ProviderEdgeTTS(TTSProvider):
                 communicate = edge_tts.Communicate(text, voice, rate=rate, volume=volume)
                 await communicate.save(output_path)
             
-            logger.info(f"成功生成音频文件: {output_path}")
+            # logger.info(f"成功生成音频文件: {output_path}")
             return output_path
             
         except Exception as e:

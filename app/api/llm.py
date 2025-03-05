@@ -3,24 +3,22 @@ llm.py
 存放与语言模型相关的接口，如对话、历史记录等
 """
 
-
-from fastapi import APIRouter, HTTPException, Depends
-from fastapi import File, UploadFile, Form
-from pydantic import BaseModel
-from typing import Optional
-import traceback
-import logging
 import os
+import logging
+import traceback
+from typing import Optional
+from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Depends, File, UploadFile, Form
 
-from app.core.llm.config import MODEL_TO_ENDPOINT
-from app.core.llm.message import MessageRole
-from app.core.llm.db_history import db_message_history
+from app import app_config, logger
 from app.api.user import get_current_user
+from app.core.llm.message import MessageRole
+from app.core.db.db_history import db_message_history
 from app.core.pipeline.chat_process import chat_process
 from app.core.pipeline.summarize_process import summarize_process
 
+MODEL_TO_ENDPOINT = app_config.llm_config['model_to_endpoint']
 
-logger = logging.getLogger("app")
 api_llm = APIRouter()
 
 # 创建音频文件存储目录
@@ -114,14 +112,6 @@ async def get_history(history_id: str, current_user=Depends(get_current_user)):
     """获取历史消息"""
     try:
         logger.info(f"请求历史记录: {history_id}")
-        
-        # # 验证历史记录存在
-        # try:
-        #     history = await ChatHistory.get(history_id=history_id)
-        #     logger.info(f"找到历史记录: {history_id}, 标题: {history.title}")
-        # except DoesNotExist:
-        #     logger.warning(f"历史记录不存在: {history_id}")
-        #     return {"history_id": history_id, "messages": []}
         
         # 使用db_message_history获取格式化消息
         messages = await db_message_history.get_history(history_id)

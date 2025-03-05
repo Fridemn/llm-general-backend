@@ -2,11 +2,7 @@ import uuid
 from tortoise.models import Model
 from tortoise import fields
 from enum import Enum
-import json
-import logging
-from typing import List, Dict, Any, Optional
-
-logger = logging.getLogger("app")
+from typing import List, Dict, Any
 
 class MessageType(str, Enum):
     TEXT = "text"

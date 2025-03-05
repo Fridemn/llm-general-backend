@@ -1,6 +1,5 @@
+from typing import Dict, Any
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional
-
 
 class TTSProvider(ABC):
     """TTS (文本转语音) 提供者抽象基类"""

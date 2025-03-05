@@ -1,15 +1,12 @@
-from typing import Dict, Any, Optional
 import logging
 import traceback
-
 from fastapi import HTTPException
+from typing import Dict, Any, Optional
 
+from app import logger
+from app.core.db.db_history import db_message_history
 from app.core.pipeline.text_process import text_process
 from app.core.llm.message import LLMMessage, MessageRole
-from app.core.llm.db_history import db_message_history
-
-logger = logging.getLogger("app")
-
 class SummarizeProcess:
     """
     摘要处理流水线，负责自动总结对话内容等功能

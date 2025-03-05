@@ -1,9 +1,8 @@
-from enum import Enum
-from typing import List, Optional, Any, Union, Dict
-from pydantic import BaseModel, Field
 import time
 import uuid
-
+from enum import Enum
+from pydantic import BaseModel, Field
+from typing import List, Optional, Any
 class MessageType(str, Enum):
     TEXT = "text"
     IMAGE = "image"

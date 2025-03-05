@@ -1,19 +1,15 @@
+import os
 import time
 import uuid
 import logging
-from typing import List, Optional, Dict, Any
-import json
 import traceback
-import os
 from fastapi import HTTPException
+from typing import List, Optional, Dict, Any
 from tortoise.exceptions import OperationalError, ConfigurationError
-from tortoise import Tortoise
-from tortoise.functions import Count
 
+from app import logger
 from app.models.chat import ChatHistory, ChatMessage, MessageRole
 from app.core.llm.message import LLMMessage, MessageComponent, MessageType
-
-logger = logging.getLogger("app")
 
 class DBMessageHistory:
     """基于数据库的消息历史记录管理"""

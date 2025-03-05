@@ -1,14 +1,10 @@
-import os
-from pathlib import Path
-from typing import Optional, Dict, Type
 import logging
+from typing import Optional, Dict, Type
 
-from app.core.strategy_selector import StrategySelector
+from app import app_config, logger
 from app.core.stt import STTProvider
+from app.core.strategy_selector import StrategySelector
 from app.core.stt.openai_strategy import ProviderOpenAISTT
-
-# 配置日志
-logger = logging.getLogger(__name__)
 
 class STTFactory:
     """STT 工厂类，负责创建 STT 提供者实例"""
@@ -19,26 +15,19 @@ class STTFactory:
     }
     
     @staticmethod
-    def create_provider(config_path: Optional[str] = None) -> Optional[STTProvider]:
+    def create_provider() -> Optional[STTProvider]:
         """
         创建 STT 提供者实例
         
-        Args:
-            config_path: 配置文件路径，默认为data/strategy_config.json
-            
         Returns:
             STTProvider 实例，如果没有找到活跃策略则返回None
         """
         try:
-            if config_path is None:
-                # 尝试确定config_path的位置
-                base_dir = Path(__file__).parent.parent.parent.parent  # 项目根目录
-                config_path = os.path.join(base_dir, "data", "strategy_config.json")
-                
-            logger.info(f"使用STT配置文件: {config_path}")
-                
-            # 创建选择器
-            selector = StrategySelector[STTProvider](config_path, "stt")
+            # 使用app_config直接获取STT配置
+            # logger.info(f"使用app_config中的STT配置")
+            
+            # 创建选择器，传入活跃策略名称和完整配置
+            selector = StrategySelector[STTProvider](app_config.stt_config["active"], app_config.stt_config)
             
             # 获取活跃策略
             active_strategy = selector.get_active_strategy()

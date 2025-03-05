@@ -1,16 +1,17 @@
-from typing import List, Dict, Optional, AsyncGenerator, Any
-import traceback
 import uuid
-from fastapi import HTTPException
 import json
+import traceback
+from typing import Dict, Optional, AsyncGenerator
 
-from app import logger
-from app.core.llm import BaseLLM, ChatMessage, LLMResponse as RawLLMResponse, OpenAILLM, AnthropicLLM, LLMConfig, OllamaLLM
-from app.core.llm.config import llm_config, MODEL_TO_ENDPOINT, DEFAULT_MODEL
-from app.core.llm.db_history import db_message_history
-from app.core.llm.message import LLMMessage, LLMResponse, MessageSender, MessageRole, MessageComponent, MessageType
+from app import logger, app_config
 from app.utils.token_counter import TokenCounter
+from app.core.db.db_history import db_message_history
+from app.core.llm.message import LLMMessage, LLMResponse, MessageSender, MessageRole, MessageComponent, MessageType
+from app.core.llm import BaseLLM, ChatMessage, LLMResponse as RawLLMResponse, OpenAILLM, AnthropicLLM, LLMConfig, OllamaLLM
 
+MODEL_TO_ENDPOINT = app_config.llm_config['model_to_endpoint']
+DEFAULT_MODEL = app_config.llm_config['default_model']
+llm_config = app_config.llm_config['endpoints']
 
 class TextProcess:
     """

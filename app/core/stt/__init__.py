@@ -1,6 +1,5 @@
+from typing import Dict, Any
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional
-
 
 class STTProvider(ABC):
     """STT (语音转文本) 提供者抽象基类"""

@@ -1,8 +1,7 @@
 import tiktoken
-from typing import List, Union, Dict, Optional, Any
-import logging
+from typing import List, Dict, Any
 
-logger = logging.getLogger("app")
+from app import logger
 
 class TokenCounter:
     """Token计数工具类"""

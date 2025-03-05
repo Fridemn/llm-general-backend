@@ -1,7 +1,5 @@
 import redis
 
-
-
 def get_redis() -> redis.StrictRedis:
     from app import app_config #延迟引入，避免循环引用
     redis_config = app_config.redis_config
