@@ -4,7 +4,7 @@ import logging
 import os
 from typing import Optional, Dict, Any
 
-from app.utils.stt import STTProcessor, STTStrategy
+from app.core.stt.openai_strategy import STTProcessor, STTStrategy
 from app import app_config
 
 logger = logging.getLogger("app")

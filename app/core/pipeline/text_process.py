@@ -12,7 +12,7 @@ from app.core.llm.message import LLMMessage, LLMResponse, MessageSender, Message
 from app.utils.token_counter import TokenCounter
 
 
-class ChatPipeline:
+class TextProcess:
     """
     聊天流水线处理器，用于处理用户消息并返回AI回复
     """
@@ -352,4 +352,4 @@ class ChatPipeline:
             yield f"错误: {str(e)}"
 
 # 全局聊天管道实例
-chat_pipeline = ChatPipeline()
+text_process = TextProcess()

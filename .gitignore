@@ -165,8 +165,9 @@ cython_debug/
 #.idea/
 
 
-
+# Voice files
 *.wav
+*.mp3
 
 ./app/llm/api.json
 .codegpt

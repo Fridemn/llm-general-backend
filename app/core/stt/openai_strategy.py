@@ -7,6 +7,8 @@ from enum import Enum
 from typing import Optional, Dict, Any, BinaryIO, Union
 import base64
 from pathlib import Path
+import asyncio
+from . import STTProvider
 
 # 设置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -237,3 +239,37 @@ def base64_to_audio(base64_string: str) -> bytes:
         音频字节
     """
     return base64.b64decode(base64_string)
+
+
+class ProviderOpenAISTT(STTProvider):
+    def __init__(self, provider_config: dict, provider_settings: dict) -> None:
+        super().__init__(provider_config, provider_settings)
+        
+        # 从配置中获取API密钥和基础URL
+        api_key = provider_config.get("api_key") or os.environ.get("OPENAI_API_KEY")
+        api_base = provider_config.get("api_base")
+        model = provider_config.get("model", STTModel.WHISPER_1)
+        strategy = provider_config.get("strategy", STTStrategy.STANDARD)
+        
+        # 创建内部处理器
+        self.processor = STTProcessor(
+            api_key=api_key,
+            api_base=api_base,
+            model=model,
+            strategy=strategy
+        )
+        
+        self.set_model("openai_stt")
+    
+    async def process_audio(self, audio_file: Union[str, Path, BinaryIO], return_full_response: bool = False, **kwargs) -> Union[str, Dict[str, Any]]:
+        """异步处理音频文件，将处理委托给内部的STTProcessor实例"""
+        # 使用run_in_executor来异步运行同步代码
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, 
+            lambda: self.processor.process(
+                audio_file, 
+                return_full_response=return_full_response, 
+                **kwargs
+            )
+        )

@@ -10,6 +10,7 @@ from app.api.user import api_user
 from app.api.system import api_system
 from app.api.llm import api_llm
 from app.api.stt import api_stt
+from fastapi.staticfiles import StaticFiles
 
 #from wordease.api.user import api_user
 
@@ -56,9 +57,9 @@ app.include_router(api_user, prefix="/user", tags=["用户相关接口"])
 app.include_router(api_system, prefix="/system", tags=["系统相关接口"])
 app.include_router(api_llm, prefix="/llm", tags=["大语言模型相关接口"])
 app.include_router(api_stt, prefix="/stt", tags=["stt 相关接口"])
-
+app.mount('/static', StaticFiles(directory='static'), name='static')
 
 if __name__ == '__main__':
     logger.info(logo_tmpl)
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
     

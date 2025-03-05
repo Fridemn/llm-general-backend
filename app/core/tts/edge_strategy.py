@@ -30,8 +30,8 @@ class ProviderEdgeTTS(TTSProvider):
         self.set_model("edge_tts")
 
     async def get_audio(self, text: str) -> str:
-        os.makedirs("data/temp", exist_ok=True)
-        mp3_path = f"data/temp/edge_tts_temp_{uuid.uuid4()}.mp3"
+        os.makedirs("static/tts", exist_ok=True)
+        mp3_path = f"static/tts/edge_tts_temp_{uuid.uuid4()}.mp3"
 
         # 构建Edge TTS参数
         kwargs = {"text": text, "voice": self.voice}

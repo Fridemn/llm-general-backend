@@ -15,13 +15,13 @@ import json
 import uuid  # 添加uuid模块导入
 import os
 
-from app.core.chat_pipline import chat_pipeline
+from app.core.pipeline.text_process import text_process
 from app.core.llm.config import MODEL_TO_ENDPOINT, DEFAULT_MODEL
 from app.core.llm.message import LLMMessage, LLMResponse, MessageRole, MessageComponent, MessageType
 from app.core.llm.db_history import db_message_history
 from app.api.user import get_current_user
 from app.models.chat import ChatHistory
-from app.utils.stt import STTProcessor, STTStrategy
+from app.core.stt.openai_strategy import STTProcessor, STTStrategy
 from app import app_config
 
 
@@ -73,7 +73,7 @@ async def chat(request: ChatRequest, current_user=Depends(get_current_user)):
         
         # 处理消息
         try:
-            response = await chat_pipeline.process_message(
+            response = await text_process.process_message(
                 model,
                 input_message,
                 history_id,
@@ -118,7 +118,7 @@ async def chat_stream(request: ChatRequest, current_user=Depends(get_current_use
             try:
                 count = 0
                 
-                async for chunk in chat_pipeline.process_message_stream(
+                async for chunk in text_process.process_message_stream(
                     model,
                     input_message,
                     history_id,
@@ -224,7 +224,7 @@ async def voice_chat_stream(request: AudioChatRequest, current_user=Depends(get_
                 
                 count = 0
                 
-                async for chunk in chat_pipeline.process_message_stream(
+                async for chunk in text_process.process_message_stream(
                     model,
                     input_message,
                     history_id,
@@ -413,7 +413,7 @@ async def summarize_history_title(history_id: str, current_user=Depends(get_curr
         
         # 调用 gpt-3.5-turbo 模型生成标题
         summary_model = "gpt-3.5-turbo"
-        response = await chat_pipeline.process_message(
+        response = await text_process.process_message(
             summary_model,
             input_message
         )
