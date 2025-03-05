@@ -30,8 +30,6 @@ class ChatProcess:
                            stream: bool,
                            stt: bool,
                            tts: bool,
-                           stt_model: Optional[str],
-                           translate_to_english: bool,
                            audio_file: Optional[UploadFile],
                            user_id: Optional[str]) -> Union[StreamingResponse, LLMResponse, Dict[str, Any]]:
         """
@@ -45,8 +43,6 @@ class ChatProcess:
             stream: 是否流式响应
             stt: 是否需要语音转文本
             tts: 是否需要文本转语音
-            stt_model: 语音识别模型
-            translate_to_english: 是否翻译为英语
             audio_file: 上传的音频文件
             user_id: 用户ID
             
@@ -69,9 +65,7 @@ class ChatProcess:
                 history_id, 
                 role, 
                 stt, 
-                audio_file, 
-                stt_model, 
-                translate_to_english
+                audio_file,
             )
             
             # 如果是语音输入，获取语音转写文本
@@ -101,9 +95,7 @@ class ChatProcess:
                                   history_id: Optional[str],
                                   role: MessageRole,
                                   stt: bool,
-                                  audio_file: Optional[UploadFile],
-                                  stt_model: Optional[str],
-                                  translate_to_english: bool) -> LLMMessage:
+                                  audio_file: Optional[UploadFile]) -> LLMMessage:
         """
         根据请求参数准备输入消息
         
@@ -124,9 +116,7 @@ class ChatProcess:
                 
                 # 使用voice_process进行语音转文本
                 transcribed_text = await voice_process.process_stt(
-                    audio_file_path, 
-                    stt_model=stt_model,
-                    translate_to_english=translate_to_english
+                    audio_file_path
                 )
                 
                 # 音频处理成功后，保存到永久存储
@@ -137,7 +127,6 @@ class ChatProcess:
                     permanent_audio_path,
                     extra_info={
                         "transcript": transcribed_text,
-                        "model": stt_model if stt_model else "default",
                         "original_filename": audio_file.filename
                     }
                 )

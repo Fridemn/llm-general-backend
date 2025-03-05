@@ -23,7 +23,6 @@ class STTModel(str, Enum):
 class STTStrategy(str, Enum):
     """语音转文字策略枚举"""
     STANDARD = "standard"  # 标准转录
-    TRANSLATE = "translate"  # 翻译为英语
 
 
 class STTProcessor:
@@ -133,61 +132,6 @@ class STTProcessor:
             logger.error(f"处理异常: {str(e)}")
             raise
     
-    def translate(self, audio_file: Union[str, Path, BinaryIO], **kwargs) -> Dict[str, Any]:
-        """
-        将音频文件翻译为英语
-        
-        Args:
-            audio_file: 音频文件路径或文件对象
-            **kwargs: 传递给API的其他参数
-            
-        Returns:
-            API返回的结果
-        """
-        endpoint = f"{self.api_base}/audio/translations"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
-        
-        logger.info(f"开始翻译，使用端点: {endpoint}")
-        # 检查文件是否存在
-        if isinstance(audio_file, (str, Path)) and not os.path.exists(audio_file):
-            raise FileNotFoundError(f"找不到音频文件: {audio_file}")
-
-        try:
-            # 准备文件
-            if isinstance(audio_file, (str, Path)):
-                with open(audio_file, "rb") as f:
-                    logger.info(f"发送文件: {audio_file}")
-                    files = {"file": f}
-                    data = {
-                        "model": self.model,
-                        **kwargs
-                    }
-                    response = requests.post(endpoint, headers=headers, files=files, data=data, timeout=30)
-            else:
-                # 假设audio_file是一个已打开的文件对象
-                files = {"file": audio_file}
-                data = {
-                    "model": self.model,
-                    **kwargs
-                }
-                response = requests.post(endpoint, headers=headers, files=files, data=data, timeout=30)
-            
-            logger.info(f"API响应状态码: {response.status_code}")
-            
-            if response.status_code != 200:
-                error_detail = f"状态码: {response.status_code}, 响应内容: {response.text or '空响应'}"
-                logger.error(f"API请求失败: {error_detail}")
-                raise Exception(f"API request failed: {error_detail}")
-            
-            return response.json()
-            
-        except requests.RequestException as e:
-            logger.error(f"请求异常: {str(e)}")
-            raise Exception(f"网络请求失败: {str(e)}")
-        except Exception as e:
-            logger.error(f"处理异常: {str(e)}")
-            raise
-    
     def process(self, audio_file: Union[str, Path, BinaryIO], return_full_response: bool = False, **kwargs) -> Union[str, Dict[str, Any]]:
         """
         根据策略处理音频文件
@@ -200,13 +144,9 @@ class STTProcessor:
         Returns:
             转录或翻译的文本，或完整的API响应
         """
-        if self.strategy == STTStrategy.STANDARD:
-            result = self.transcribe(audio_file, **kwargs)
-        elif self.strategy == STTStrategy.TRANSLATE:
-            result = self.translate(audio_file, **kwargs)
-        else:
-            raise ValueError(f"不支持的策略: {self.strategy}")
-        
+
+        result = self.transcribe(audio_file, **kwargs)
+
         if return_full_response:
             return result
         return result.get("text", "")
@@ -277,25 +217,19 @@ class ProviderOpenAISTT(STTProvider):
             audio_file: 音频文件路径
             **kwargs: 额外参数
                 - model: 可选，要使用的模型名称
-                - translate_to_english: 布尔值，是否将音频翻译为英文
                 
         Returns:
             转录文本
         """
         try:
-            # 提取转录选项
-            translate_to_english = kwargs.pop("translate_to_english", False)
+
             model = kwargs.pop("model", None)
             
             # 如果指定了模型，设置到处理器
             if model:
                 self.processor.model = model
                 
-            # 设置策略
-            if translate_to_english:
-                self.processor.strategy = STTStrategy.TRANSLATE
-            else:
-                self.processor.strategy = STTStrategy.STANDARD
+            STTStrategy.STANDARD
                 
             # 使用 asyncio 将同步操作放入线程池
             loop = asyncio.get_running_loop()

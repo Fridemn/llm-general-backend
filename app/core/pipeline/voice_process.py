@@ -24,14 +24,12 @@ class VoiceProcess:
     def __init__(self):
         pass
         
-    async def process_stt(self, audio_file_path: str, stt_model: Optional[str] = None, translate_to_english: bool = False) -> str:
+    async def process_stt(self, audio_file_path: str) -> str:
         """
         语音转文本处理
         
         Args:
             audio_file_path: 音频文件路径
-            stt_model: 使用的STT模型
-            translate_to_english: 是否翻译为英语
             
         Returns:
             转写的文本内容
@@ -43,13 +41,9 @@ class VoiceProcess:
             logger.error("无法创建STT提供者")
             raise ValueError("无法创建STT提供者")
         
-        # 设置额外参数（如翻译到英文）
-        extra_params = {"translate_to_english": translate_to_english}
-        if stt_model:
-            extra_params["model"] = stt_model
         
         # 使用提供者处理音频
-        transcribed_text = await stt_provider.transcribe(audio_file_path, **extra_params)
+        transcribed_text = await stt_provider.transcribe(audio_file_path)
         logger.info(f"语音转录结果: {transcribed_text}")
         
         # 检查转录结果是否为空

@@ -5,26 +5,17 @@ llm.py
 
 
 from fastapi import APIRouter, HTTPException, Depends
-from fastapi.responses import StreamingResponse
 from fastapi import File, UploadFile, Form
 from pydantic import BaseModel
 from typing import Optional
 import traceback
 import logging
-import json
-import uuid
 import os
-import shutil
-import tempfile
-from datetime import datetime
 
-from app.core.pipeline.text_process import text_process
-from app.core.pipeline.voice_process import voice_process
-from app.core.llm.config import MODEL_TO_ENDPOINT, DEFAULT_MODEL
-from app.core.llm.message import LLMMessage, MessageRole, MessageComponent, MessageType, MessageSender
+from app.core.llm.config import MODEL_TO_ENDPOINT
+from app.core.llm.message import MessageRole
 from app.core.llm.db_history import db_message_history
 from app.api.user import get_current_user
-from app import app_config
 from app.core.pipeline.chat_process import chat_process
 from app.core.pipeline.summarize_process import summarize_process
 
@@ -51,7 +42,6 @@ class AudioChatRequest(BaseModel):
     history_id: Optional[str] = None
     role: MessageRole = MessageRole.USER
     stt_model: Optional[str] = None
-    translate_to_english: bool = False
 
 class UnifiedChatRequest(BaseModel):
     """统一的聊天请求模型"""
@@ -63,11 +53,10 @@ class UnifiedChatRequest(BaseModel):
     stt: bool = False  # 是否需要语音识别
     tts: bool = False  # 是否需要文本转语音(预留)
     stt_model: Optional[str] = None  # STT模型选择
-    translate_to_english: bool = False  # 是否翻译为英语
 
 
 # 统一的聊天接口
-@api_llm.post("/unified_chat")
+@api_llm.post("/chat")
 async def unified_chat(
     model: Optional[str] = Form(None),
     message: Optional[str] = Form(""),
@@ -76,8 +65,6 @@ async def unified_chat(
     stream: bool = Form(False),
     stt: bool = Form(False),
     tts: bool = Form(False),
-    stt_model: Optional[str] = Form(None),
-    translate_to_english: bool = Form(False),
     audio_file: Optional[UploadFile] = File(None),
     current_user=Depends(get_current_user)
 ):
@@ -97,8 +84,6 @@ async def unified_chat(
             stream=stream,
             stt=stt,
             tts=tts,
-            stt_model=stt_model,
-            translate_to_english=translate_to_english,
             audio_file=audio_file,
             user_id=user_id
         )
