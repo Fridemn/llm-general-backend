@@ -67,17 +67,17 @@ class DBMessageHistory:
                     if not comp_dict.get("extra"):
                         comp_dict["extra"] = {}
                         
-                    # 检查文件是否存在
-                    if os.path.exists(comp.content):
-                        comp_dict["extra"]["file_exists"] = True
-                        # 可以在这里添加文件大小等信息
-                        try:
-                            comp_dict["extra"]["file_size"] = os.path.getsize(comp.content)
-                        except:
-                            pass
-                    else:
-                        comp_dict["extra"]["file_exists"] = False
-                        logger.warning(f"音频文件不存在: {comp.content}")
+                    # # 检查文件是否存在
+                    # if os.path.exists(comp.content):
+                    #     comp_dict["extra"]["file_exists"] = True
+                    #     # 可以在这里添加文件大小等信息
+                    #     try:
+                    #         comp_dict["extra"]["file_size"] = os.path.getsize(comp.content)
+                    #     except:
+                    #         pass
+                    # else:
+                    #     comp_dict["extra"]["file_exists"] = False
+                    #     logger.warning(f"音频文件不存在: {comp.content}")
                 
                 components.append(comp_dict)
             else:
@@ -175,17 +175,39 @@ class DBMessageHistory:
         
         # 特殊处理音频类型
         if comp_type == MessageType.AUDIO and content:
-            # 检查文件是否存在
-            if os.path.exists(content):
-                # 文件存在，更新元数据
+            # 检查原始文件路径是否存在于extra中
+            file_path = extra.get("file_path", "")
+            
+            # 如果有原始文件路径且文件存在，更新元数据
+            if file_path and os.path.exists(file_path):
                 if not extra:
                     extra = {}
                 extra["file_exists"] = True
                 # 添加文件大小信息
                 try:
-                    extra["file_size"] = os.path.getsize(content)
+                    extra["file_size"] = os.path.getsize(file_path)
                 except:
                     pass
+            elif content.startswith("/static/audio/"):
+                # 尝试从URL路径构造本地路径进行检查
+                try:
+                    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+                    potential_path = os.path.join(base_dir, content[1:])  # 去掉开头的"/"
+                    if os.path.exists(potential_path):
+                        if not extra:
+                            extra = {}
+                        extra["file_exists"] = True
+                        extra["file_size"] = os.path.getsize(potential_path)
+                        # 更新文件路径用于未来检查
+                        extra["file_path"] = potential_path
+                    else:
+                        if not extra:
+                            extra = {}
+                        extra["file_exists"] = False
+                except:
+                    if not extra:
+                        extra = {}
+                    extra["file_exists"] = False
             else:
                 # 文件不存在，标记状态
                 if not extra:

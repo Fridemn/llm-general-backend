@@ -113,6 +113,7 @@ class ChatProcess:
                 temp_dir = audio_info["temp_dir"]
                 audio_file_path = audio_info["temp_path"]
                 permanent_audio_path = audio_info["permanent_path"]
+                permanent_audio_url = audio_info["permanent_url"]
                 
                 # 使用voice_process进行语音转文本
                 transcribed_text = await voice_process.process_stt(
@@ -122,12 +123,13 @@ class ChatProcess:
                 # 音频处理成功后，保存到永久存储
                 voice_process.save_to_permanent_storage(audio_file_path, permanent_audio_path)
                 
-                # 构造输入消息
+                # 构造输入消息 - 使用URL路径而非本地路径
                 audio_component = voice_process.create_audio_component(
-                    permanent_audio_path,
+                    permanent_audio_url,
                     extra_info={
                         "transcript": transcribed_text,
-                        "original_filename": audio_file.filename
+                        "original_filename": audio_file.filename,
+                        "file_path": permanent_audio_path  # 保存原始文件路径用于文件存在性检查
                     }
                 )
                 
@@ -182,7 +184,7 @@ class ChatProcess:
                 full_response_text = ""  # 收集完整响应用于TTS
                 
                 # 如果是语音输入，先返回识别结果
-                if stt and transcribed_text:
+                if (stt and transcribed_text):
                     yield f"data: {json.dumps({'transcription': transcribed_text})}\n\n"
                 
                 # 处理消息流

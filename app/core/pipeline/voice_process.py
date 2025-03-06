@@ -22,6 +22,26 @@ class VoiceProcess:
     
     def __init__(self):
         pass
+    
+    def path_to_url(self, file_path: str) -> str:
+        """
+        将本地文件路径转换为URL路径
+        
+        Args:
+            file_path: 本地文件完整路径
+            
+        Returns:
+            转换后的URL路径
+        """
+        # 检查路径是否包含static/audio部分
+        if 'static/audio' in file_path.replace('\\', '/'):
+            parts = file_path.replace('\\', '/').split('static/audio/')
+            if len(parts) > 1:
+                return f"/static/audio/{parts[1]}"
+        
+        # 如果路径直接是文件名，直接返回相对路径
+        file_name = os.path.basename(file_path)
+        return f"/static/audio/{file_name}"
         
     async def process_stt(self, audio_file_path: str) -> str:
         """
@@ -80,12 +100,17 @@ class VoiceProcess:
         filename = f"{timestamp}_{uuid.uuid4()}{file_extension}"
         permanent_audio_path = os.path.join(AUDIO_STORAGE_DIR, filename)
         
+        # 生成URL路径
+        permanent_audio_url = self.path_to_url(permanent_audio_path)
+        
         logger.info(f"音频文件临时保存至: {audio_file_path}")
         logger.info(f"音频文件将永久保存至: {permanent_audio_path}")
+        logger.info(f"音频文件URL路径: {permanent_audio_url}")
         
         return {
             "temp_path": audio_file_path,
             "permanent_path": permanent_audio_path,
+            "permanent_url": permanent_audio_url,
             "filename": filename,
             "temp_dir": temp_dir,
             "should_delete_temp": should_delete_temp
@@ -167,7 +192,7 @@ class VoiceProcess:
         创建音频消息组件
         
         Args:
-            audio_path: 音频文件路径
+            audio_path: 音频文件路径或URL
             text: 相关文本
             extra_info: 额外信息
             
@@ -179,10 +204,18 @@ class VoiceProcess:
         if text:
             # 如果有文本，则添加到extra信息中
             extra["original_text"] = text[:100] + "..." if len(text) > 100 else text
+        
+        # 确保路径是URL格式
+        if os.path.exists(audio_path) or ':\\' in audio_path:
+            audio_url = self.path_to_url(audio_path)
+            # 保存原始路径用于文件存在性检查
+            extra["file_path"] = audio_path
+        else:
+            audio_url = audio_path
             
         return MessageComponent(
             type=MessageType.AUDIO,
-            content=audio_path,
+            content=audio_url,
             extra=extra
         )
 
