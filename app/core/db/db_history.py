@@ -66,18 +66,6 @@ class DBMessageHistory:
                     # 确保保留音频文件路径和转录文本
                     if not comp_dict.get("extra"):
                         comp_dict["extra"] = {}
-                        
-                    # # 检查文件是否存在
-                    # if os.path.exists(comp.content):
-                    #     comp_dict["extra"]["file_exists"] = True
-                    #     # 可以在这里添加文件大小等信息
-                    #     try:
-                    #         comp_dict["extra"]["file_size"] = os.path.getsize(comp.content)
-                    #     except:
-                    #         pass
-                    # else:
-                    #     comp_dict["extra"]["file_exists"] = False
-                    #     logger.warning(f"音频文件不存在: {comp.content}")
                 
                 components.append(comp_dict)
             else:
@@ -460,6 +448,37 @@ class DBMessageHistory:
             return False
         except Exception as e:
             logger.error(f"检查音频消息失败: {e}")
+            return False
+
+    async def delete_message(self, history_id: str, message_id: str) -> bool:
+        """删除历史记录中的特定消息"""
+        # 确保连接已初始化
+        await self._ensure_connection()
+        
+        try:
+            # 验证ID格式
+            try:
+                history_uuid = uuid.UUID(history_id)
+                message_uuid = uuid.UUID(message_id)
+            except ValueError:
+                logger.error(f"无效的ID格式: history_id={history_id}, message_id={message_id}")
+                return False
+            
+            # 删除消息
+            deleted_count = await ChatMessage.filter(
+                history_id=history_uuid,
+                message_id=message_uuid
+            ).delete()
+            
+            if deleted_count > 0:
+                return True
+            else:
+                logger.warning(f"要删除的消息不存在: history_id={history_id}, message_id={message_id}")
+                return False
+            
+        except Exception as e:
+            error_trace = traceback.format_exc()
+            logger.error(f"删除消息失败: {e}\n{error_trace}")
             return False
 
 

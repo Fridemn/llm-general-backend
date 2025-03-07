@@ -10,6 +10,7 @@ from fastapi.responses import StreamingResponse
 from app import app_config, logger
 from app.core.pipeline.text_process import text_process
 from app.core.pipeline.voice_process import voice_process
+from app.core.db.db_history import db_message_history
 from app.core.llm.message import LLMMessage, LLMResponse, MessageRole, MessageComponent, MessageSender, MessageType
 
 DEFAULT_MODEL = app_config.llm_config['default_model']
@@ -50,7 +51,6 @@ class ChatProcess:
             StreamingResponse或LLMResponse
         """
         # 初始化变量
-        temp_dir = None
         input_message = None
         transcribed_text = None
         
@@ -182,6 +182,9 @@ class ChatProcess:
             try:
                 count = 0
                 full_response_text = ""  # 收集完整响应用于TTS
+                token_info = None        # 保存token信息
+                message_id = None        # 保存原始消息ID
+                current_history_id = history_id or input_message.history_id  # 使用有效的历史ID
                 
                 # 如果是语音输入，先返回识别结果
                 if (stt and transcribed_text):
@@ -191,7 +194,7 @@ class ChatProcess:
                 async for chunk in text_process.process_message_stream(
                     model,
                     input_message,
-                    history_id,
+                    current_history_id,  # 使用确定的历史ID
                     user_id
                 ):
                     count += 1
@@ -200,6 +203,11 @@ class ChatProcess:
                     if chunk.startswith("__TOKEN_INFO__"):
                         try:
                             token_data = json.loads(chunk[14:])  # 去掉特殊前缀
+                            token_info = token_data
+                            message_id = token_data.get("message_id")
+                            # 如果token信息中包含了history_id，使用它更新当前历史ID
+                            if "history_id" in token_data and token_data["history_id"]:
+                                current_history_id = token_data["history_id"]
                             token_response = f"data: {json.dumps({'token_info': token_data})}\n\n"
                             yield token_response
                         except Exception as e:
@@ -211,11 +219,41 @@ class ChatProcess:
                         response_text = f"data: {json.dumps({'text': chunk})}\n\n"
                         yield response_text
                 
-                # 如果需要TTS且有响应文本
-                if tts and full_response_text.strip():
+                # 如果需要TTS且有响应文本且有message_id
+                if tts and full_response_text.strip() and message_id and current_history_id:
+                    logger.debug(f"尝试处理TTS，历史ID: {current_history_id}, 消息ID: {message_id}")
                     audio_url = await voice_process.process_tts(full_response_text)
                     if audio_url:
-                        yield f"data: {json.dumps({'audio': audio_url})}\n\n"
+                        # 创建音频组件
+                        audio_component = voice_process.create_audio_component(
+                            audio_url, 
+                            full_response_text,
+                            {"tts_model": "default"}
+                        )
+                        
+                        # 创建并保存新的音频消息
+                        audio_message = LLMMessage(
+                            history_id=current_history_id,
+                            sender=MessageSender(role=MessageRole.ASSISTANT, nickname=model),
+                            components=[audio_component],
+                            message_str=full_response_text,
+                            output_tokens=token_info.get("output_tokens") if token_info else None,
+                            source_model=model
+                        )
+                        
+                        # 保存音频消息到数据库
+                        logger.debug(f"流式响应：保存音频消息，历史ID: {current_history_id}")
+                        success = await db_message_history.add_message(current_history_id, audio_message)
+                        
+                        if success:
+                            # 删除原始文本消息
+                            await db_message_history.delete_message(current_history_id, message_id)
+                            logger.info(f"流式响应：已成功将AI回复转换为音频消息")
+                            # 发送音频URL
+                            yield f"data: {json.dumps({'audio': audio_url, 'new_message_id': audio_message.message_id})}\n\n"
+                        else:
+                            logger.error(f"流式响应：保存音频消息失败，历史ID={current_history_id}")
+                            yield f"data: {json.dumps({'audio': audio_url})}\n\n"
                     else:
                         yield f"data: {json.dumps({'tts_error': '无法生成语音'})}\n\n"
                 
@@ -269,7 +307,21 @@ class ChatProcess:
             
             # 如果需要TTS处理
             if tts and response.response_message.message_str.strip():
+                # 优先使用响应消息中的历史ID，如果没有，再使用输入参数中的历史ID
+                current_history_id = response.response_message.history_id or history_id
+                if not current_history_id:
+                    logger.warning("缺少有效的历史记录ID，无法保存音频消息")
+                    # 添加音频URL到结果字典中，但不进行数据库操作
+                    audio_url = await voice_process.process_tts(response.response_message.message_str)
+                    if audio_url:
+                        result_dict = response.dict()
+                        result_dict["audio_url"] = audio_url
+                        return result_dict
+                    return response
+
+                original_message_id = response.response_message.message_id
                 audio_url = await voice_process.process_tts(response.response_message.message_str)
+                
                 if audio_url:
                     # 创建音频组件并添加到响应
                     audio_component = voice_process.create_audio_component(
@@ -278,8 +330,29 @@ class ChatProcess:
                         {"tts_model": "default"}
                     )
                     
-                    # 添加到响应组件中
-                    response.response_message.components.append(audio_component)
+                    # 创建并保存新的音频消息
+                    audio_message = LLMMessage(
+                        history_id=current_history_id,  # 使用确认有效的历史ID
+                        sender=MessageSender(role=MessageRole.ASSISTANT, nickname=model),
+                        components=[audio_component],
+                        message_str=response.response_message.message_str,
+                        output_tokens=response.response_message.output_tokens,
+                        source_model=model
+                    )
+                    
+                    # 保存音频消息到数据库
+                    logger.debug(f"保存音频消息，历史ID: {current_history_id}")
+                    success = await db_message_history.add_message(current_history_id, audio_message)
+                    
+                    if success:
+                        # 删除原始文本消息
+                        await db_message_history.delete_message(current_history_id, original_message_id)
+                        logger.info(f"已成功将AI回复转换为音频消息: {audio_message.message_id}")
+                        
+                        # 更新响应为新的音频消息
+                        response.response_message = audio_message
+                    else:
+                        logger.error(f"保存音频消息到数据库失败: history_id={current_history_id}")
                     
                     # 添加音频URL到结果字典中
                     result_dict = response.dict()

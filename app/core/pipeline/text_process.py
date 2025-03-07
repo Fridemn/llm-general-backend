@@ -341,7 +341,8 @@ class TextProcess:
                 token_info = json.dumps({
                     'input_tokens': estimated_input_tokens,
                     'output_tokens': output_tokens,
-                    'message_id': response_message.message_id
+                    'message_id': response_message.message_id,
+                    'history_id': current_history_id  # 添加历史ID到token信息中
                 })
                 yield f"__TOKEN_INFO__{token_info}"
             except Exception as e:
