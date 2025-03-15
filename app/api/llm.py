@@ -15,7 +15,9 @@ from app.api.user import get_current_user
 from app.core.llm.message import MessageRole
 from app.core.db.db_history import db_message_history
 from app.core.pipeline.chat_process import chat_process
+from app.core.pipeline.function_process import function_process
 from app.core.pipeline.summarize_process import summarize_process
+from app.core.funcall.function_handler import function_handler
 
 MODEL_TO_ENDPOINT = app_config.llm_config['model_to_endpoint']
 
@@ -72,6 +74,45 @@ async def unified_chat(
     try:
         # 获取当前用户ID
         user_id = str(current_user["user_id"]) if current_user else None
+        
+        # 检查是否是函数调用命令
+        if message:
+            function_call = function_handler.detect_function_call_intent(message)
+            if function_call:
+                function_name, result, need_llm = function_handler.handle_function_call(function_call)
+                
+                function_message = function_handler.create_function_message(
+                    history_id or "", function_name, result
+                )
+                
+                if history_id:
+                    await db_message_history.add_message(history_id, function_message)
+                
+                need_llm = function_call.get("need_llm", need_llm)
+                
+                if need_llm:
+                    return await function_process.handle_function_result(
+                        model=model,
+                        function_name=function_name,
+                        result=result,
+                        history_id=history_id,
+                        stream=stream,
+                        tts=tts,
+                        user_id=user_id,
+                        function_message=function_message
+                    )
+                else:
+                    if stream:
+                        return function_process.create_function_stream_response(function_name, result)
+                    else:
+                        return {
+                            "success": True,
+                            "function_call": {
+                                "name": function_name,
+                                "result": result
+                            },
+                            "message_id": function_message.message_id
+                        }
         
         # 使用聊天流水线处理请求
         return await chat_process.handle_request(
