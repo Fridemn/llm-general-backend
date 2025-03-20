@@ -50,7 +50,7 @@ class STTFactory:
                 default_config = {
                     "id": "openai",
                     "type": "openai",
-                    "model": "whisper-1"
+                    "model": "whisper-large-v3"
                 }
                 return ProviderOpenAISTT(default_config, {})
             except Exception as e2:
