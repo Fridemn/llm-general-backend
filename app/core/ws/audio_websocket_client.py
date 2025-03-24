@@ -87,13 +87,15 @@ class AudioWebSocketClient:
                     if user != "unknown":
                         self.voiceprint_result = {"success": True, "user": user}
                     
-                    # 添加：直接保存识别结果到final_result
-                    if not self.final_result or self.final_result.get("text") == "等待识别结果...":
+                    # 直接保存识别结果到final_result - 忽略"等待识别结果..."
+                    if text != "等待识别结果..." and text != "识别结果将在服务器处理完成后显示":
                         self.final_result = {
                             "text": text,
                             "user": user,
                             "segments": [{"text": text, "user": user}]
                         }
+                        # 立即设置流式识别完成事件
+                        self.streaming_complete.set()
             else:
                 error_msg = data.get("error", "未知错误")
                 print(f"请求 {request_id} 失败: {error_msg}")
@@ -226,9 +228,6 @@ class AudioWebSocketClient:
         
         # 等待服务器处理并返回结果
         try:
-            # 给服务器足够的时间处理和返回结果
-            await asyncio.sleep(2.0)
-            
             # 如果有流式结果处理完成，创建最终结果
             if self.streaming_results:
                 combined_text = " ".join([result["text"] for result in self.streaming_results])
@@ -384,7 +383,6 @@ class AudioWebSocketClient:
             await self.send_request("match_voiceprint", data)
             
             # 稍微等待一下响应
-            await asyncio.sleep(1)
             print("声纹验证已完成，继续流式识别")
         
         # 启动流式识别
@@ -452,7 +450,6 @@ class AudioWebSocketClient:
             await self.send_request("match_voiceprint", data)
             
             # 等待声纹验证结果
-            await asyncio.sleep(0.5)
             print("声纹验证已完成")
         
         # 一次性识别整段音频
@@ -461,8 +458,6 @@ class AudioWebSocketClient:
         
         # 等待返回结果
         try:
-            await asyncio.sleep(1.5)  # 等待服务器处理并返回结果
-            
             # 如果没有结果，创建一个错误结果
             if not self.final_result:
                 self.final_result = {"error": "未收到识别结果"}
@@ -491,166 +486,3 @@ class AudioWebSocketClient:
         
         self.audio.terminate()
         print("连接已关闭")
-
-
-async def main():
-    # 使用本地地址作为默认值，避免DNS解析错误
-    server_url = "ws://127.0.0.1:8765"
-    
-    # 可以根据需要修改为实际的服务器地址
-    # server_url = "ws://192.168.1.100:8765"
-    
-    print(f"尝试连接到WebSocket服务器: {server_url}")
-    
-    # 创建WebSocket客户端
-    client = AudioWebSocketClient(server_url)
-    
-    try:
-        # 连接到服务器
-        if await client.connect():
-            print("成功连接到服务器，准备进行语音识别...")
-            
-            # 先查询声纹列表，检查注册状态
-            print("正在获取声纹库信息...")
-            await client.list_voiceprints()
-            # 等待一会儿，让响应通过websocket接收
-            await asyncio.sleep(1)
-            
-            # 显示菜单
-            while True:
-                print("\n==== 语音识别系统 ====")
-                print("1. 查看声纹列表")
-                print("2. 注册新声纹")
-                print("3. 进行流式语音识别 (检查声纹)")
-                print("4. 进行流式语音识别 (不检查声纹)")
-                print("5. 录音完成后识别 (检查声纹)")
-                print("6. 录音完成后识别 (不检查声纹)")
-                print("7. 从文件识别音频")
-                print("0. 退出程序")
-                
-                choice = input("\n请选择操作: ")
-                
-                if choice == "1":
-                    # 查看声纹列表
-                    # 发送请求并等待响应
-                    await client.list_voiceprints()
-                    # 等待一会儿，让响应通过message_handler异步处理
-                    await asyncio.sleep(1)
-                    
-                    response = await client.list_voiceprints()
-                    if response.get("success", False) and "voiceprints" in response:
-                        voiceprints = response["voiceprints"]
-                        print("\n当前声纹库列表:")
-                        print("+" + "-" * 70 + "+")
-                        print(f"| {'ID':<40} | {'用户名':<25} |")
-                        print("+" + "-" * 70 + "+")
-                        
-                        for vp in voiceprints:
-                            print(f"| {vp['id']:<40} | {vp['person_name']:<25} |")
-                            
-                        print("+" + "-" * 70 + "+")
-                        print(f"总计: {len(voiceprints)} 条声纹记录\n")
-                    else:
-                        print("获取声纹列表失败")
-                
-                elif choice == "2":
-                    # 注册新声纹
-                    person_name = input("请输入用户名: ")
-                    print("即将录制声纹样本...")
-                    audio_data = await client.record_audio(3)
-                    result = await client.register_voiceprint(audio_data, person_name)
-                    if result.get("success", False):
-                        print(f"声纹 '{person_name}' 注册成功")
-                    else:
-                        print(f"声纹注册失败: {result.get('error', '未知错误')}")
-                
-                elif choice == "3":
-                    # 流式识别 (检查声纹)
-                    duration = int(input("请输入录音时长(秒): ") or "5")
-                    result = await client.stream_audio_from_mic(duration, check_voiceprint=True)
-                    
-                    if "error" not in result:
-                        print("\n=== 识别摘要 ===")
-                        print(f"完整文本: {result['text']}")
-                        print(f"识别用户: {result['user']}")
-                        print(f"识别片段数: {len(result['segments'])}")
-                        print("================\n")
-                    else:
-                        print(f"识别失败: {result['error']}")
-                
-                elif choice == "4":
-                    # 流式识别 (不检查声纹)
-                    duration = int(input("请输入录音时长(秒): ") or "5")
-                    result = await client.stream_audio_from_mic(duration, check_voiceprint=False)
-                    
-                    if "error" not in result:
-                        print("\n=== 识别摘要 ===")
-                        print(f"完整文本: {result['text']}")
-                        print("用户: 未检查声纹")
-                        print(f"识别片段数: {len(result['segments'])}")
-                        print("================\n")
-                    else:
-                        print(f"识别失败: {result['error']}")
-                
-                elif choice == "5":
-                    # 录音完成后识别 (检查声纹)
-                    duration = int(input("请输入录音时长(秒): ") or "5")
-                    result = await client.stream_audio_from_mic_batch(duration, check_voiceprint=True)
-                    
-                    if "error" not in result:
-                        print("\n=== 识别摘要 ===")
-                        print(f"完整文本: {result['text']}")
-                        print(f"识别用户: {result['user']}")
-                        print("================\n")
-                    else:
-                        print(f"识别失败: {result['error']}")
-                
-                elif choice == "6":
-                    # 录音完成后识别 (不检查声纹)
-                    duration = int(input("请输入录音时长(秒): ") or "5")
-                    result = await client.stream_audio_from_mic_batch(duration, check_voiceprint=False)
-                    
-                    if "error" not in result:
-                        print("\n=== 识别摘要 ===")
-                        print(f"完整文本: {result['text']}")
-                        print("用户: 未检查声纹")
-                        print("================\n")
-                    else:
-                        print(f"识别失败: {result['error']}")
-                
-                elif choice == "7":
-                    # 从文件识别
-                    file_path = input("请输入音频文件路径: ")
-                    if os.path.exists(file_path):
-                        await client.recognize_audio_from_file(file_path)
-                    else:
-                        print("文件不存在")
-                
-                elif choice == "0":
-                    print("退出程序...")
-                    break
-                
-                else:
-                    print("无效选择，请重新输入")
-                
-                input("\n按Enter继续...")
-            
-        else:
-            print("无法连接到WebSocket服务器，请检查以下内容：")
-            print("1. 服务器是否已启动并运行")
-            print("2. 服务器地址和端口是否正确")
-            print("3. 是否有防火墙阻止连接")
-            print("4. 网络连接是否正常")
-    except Exception as e:
-        print(f"运行时发生错误: {str(e)}")
-    finally:
-        # 关闭连接
-        await client.close()
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n程序被用户中断")
-    except Exception as e:
-        print(f"程序异常退出: {str(e)}")

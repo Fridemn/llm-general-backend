@@ -1,0 +1,731 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket语音聊天演示</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            line-height: 1.6;
+        }
+        h1, h2 {
+            color: #333;
+            text-align: center;
+        }
+        .card {
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .button {
+            background-color: #4CAF50;
+            border: none;
+            color: white;
+            padding: 10px 20px;
+            text-align: center;
+            text-decoration: none;
+            display: inline-block;
+            font-size: 16px;
+            margin: 4px 2px;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+        .button.stop {
+            background-color: #f44336;
+        }
+        .button.disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        .progress-bar {
+            width: 100%;
+            background-color: #e0e0e0;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+        .progress {
+            height: 20px;
+            background-color: #4CAF50;
+            border-radius: 5px;
+            width: 0%;
+            transition: width 0.3s;
+            text-align: center;
+            color: white;
+            line-height: 20px;
+        }
+        .result {
+            margin-top: 20px;
+            border-left: 4px solid #2196F3;
+            padding-left: 10px;
+        }
+        .log {
+            height: 200px;
+            overflow-y: auto;
+            border: 1px solid #ddd;
+            padding: 10px;
+            border-radius: 4px;
+            background-color: #f9f9f9;
+            font-family: monospace;
+        }
+        .settings {
+            margin-bottom: 20px;
+        }
+        .conversation {
+            display: flex;
+            flex-direction: column;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 10px;
+            margin: 10px 0;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .message {
+            margin: 5px;
+            padding: 10px;
+            border-radius: 8px;
+            max-width: 80%;
+            word-wrap: break-word;
+        }
+        .user-message {
+            background-color: #e3f2fd;
+            align-self: flex-end;
+        }
+        .bot-message {
+            background-color: #f1f1f1;
+            align-self: flex-start;
+        }
+        .audio-controls {
+            margin-top: 5px;
+        }
+        select, input[type="text"], input[type="number"] {
+            width: 100%;
+            padding: 8px;
+            margin: 5px 0;
+            display: inline-block;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+    </style>
+</head>
+<body>
+    <h1>WebSocket语音聊天演示</h1>
+    
+    <div class="card">
+        <h2>连接设置</h2>
+        <div class="settings">
+            <div>
+                <label for="api-url">WebSocket API地址:</label>
+                <input type="text" id="api-url" value="ws://localhost:8000/ws/voice-chat">
+                <button id="connect-btn" class="button">连接</button>
+                <button id="create-history-btn" class="button" disabled>创建新对话</button>
+            </div>
+            <div>
+                <span id="connection-status" style="margin-left: 10px; font-weight: bold; color: #f44336;">未连接</span>
+            </div>
+        </div>
+    </div>
+    
+    <div class="card">
+        <h2>聊天参数</h2>
+        <div class="settings">
+            <div>
+                <label for="model-select">选择模型:</label>
+                <select id="model-select" disabled>
+                    <option value="">加载中...</option>
+                </select>
+            </div>
+            <div>
+                <label for="history-id">对话历史ID:</label>
+                <input type="text" id="history-id">
+                <button id="use-history-btn" class="button" disabled>使用此ID</button>
+            </div>
+            <div>
+                <label for="duration">录音时长 (秒):</label>
+                <input type="number" id="duration" min="1" max="60" value="10">
+            </div>
+            <div class="checkbox-container">
+                <input type="checkbox" id="stream-mode" checked>
+                <label for="stream-mode">启用流式响应</label>
+            </div>
+        </div>
+    </div>
+    
+    <div class="card">
+        <h2>语音聊天</h2>
+        <button id="start-chat-btn" class="button" disabled>开始录音</button>
+        <button id="stop-btn" class="button stop" disabled>停止录音</button>
+        <div class="progress-bar">
+            <div id="progress" class="progress">0%</div>
+        </div>
+        <div id="status">等待连接...</div>
+    </div>
+    
+    <div class="card">
+        <h2>对话历史</h2>
+        <div id="conversation" class="conversation">
+            <div class="message bot-message">
+                您好，请按下"开始录音"按钮进行语音交流。
+            </div>
+        </div>
+    </div>
+    
+    <div class="card">
+        <h2>日志</h2>
+        <div id="log" class="log"></div>
+    </div>
+
+    <script>
+        // WebSocket连接
+        let socket;
+        let clientId;
+        let isRecording = false;
+        let isConnected = false;
+        let historyId = null;
+        let audioElement = null;
+        let currentModels = [];
+        let currentStreamMessage = null;
+        
+        // 元素引用
+        const startChatBtn = document.getElementById('start-chat-btn');
+        const stopBtn = document.getElementById('stop-btn');
+        const connectBtn = document.getElementById('connect-btn');
+        const createHistoryBtn = document.getElementById('create-history-btn');
+        const connectionStatus = document.getElementById('connection-status');
+        const progress = document.getElementById('progress');
+        const status = document.getElementById('status');
+        const conversationElement = document.getElementById('conversation');
+        const logElement = document.getElementById('log');
+        const modelSelect = document.getElementById('model-select');
+        const historyIdInput = document.getElementById('history-id');
+        const durationInput = document.getElementById('duration');
+        const apiUrlInput = document.getElementById('api-url');
+        const useHistoryBtn = document.getElementById('use-history-btn');
+        const streamModeCheckbox = document.getElementById('stream-mode');
+        
+        // 初始化WebSocket连接
+        function initWebSocket(wsUrl) {
+            if (socket && socket.readyState !== WebSocket.CLOSED) {
+                socket.close();
+            }
+            
+            connectionStatus.textContent = "正在连接...";
+            connectionStatus.style.color = "#ff9800";
+            
+            addToLog(`正在连接到 ${wsUrl}...`);
+            
+            try {
+                socket = new WebSocket(wsUrl);
+                
+                socket.onopen = () => {
+                    addToLog('WebSocket连接已建立');
+                    isConnected = true;
+                    startChatBtn.disabled = !historyId;
+                    createHistoryBtn.disabled = false;
+                    useHistoryBtn.disabled = false; // 启用"使用此ID"按钮
+                    connectBtn.textContent = '重新连接';
+                    connectionStatus.textContent = "已连接";
+                    connectionStatus.style.color = "#4CAF50";
+                    status.textContent = '已连接到服务器，请创建新对话或选择模型';
+                    updateUIState();
+                    
+                    // 加载可用模型
+                    fetchAvailableModels();
+                };
+                
+                socket.onclose = (event) => {
+                    const reason = event.reason ? event.reason : "未提供关闭原因";
+                    const code = event.code;
+                    addToLog(`WebSocket连接已关闭 - 代码: ${code}, 原因: ${reason}`);
+                    
+                    isConnected = false;
+                    startChatBtn.disabled = true;
+                    stopBtn.disabled = true;
+                    createHistoryBtn.disabled = true;
+                    useHistoryBtn.disabled = true; // 禁用"使用此ID"按钮
+                    isRecording = false;
+                    connectionStatus.textContent = "未连接";
+                    connectionStatus.style.color = "#f44336";
+                    status.textContent = '未连接';
+                    updateUIState();
+                };
+                
+                socket.onerror = (error) => {
+                    addToLog(`WebSocket错误: ${JSON.stringify(error)}`);
+                    
+                    isConnected = false;
+                    startChatBtn.disabled = true;
+                    stopBtn.disabled = true;
+                    createHistoryBtn.disabled = true;
+                    useHistoryBtn.disabled = true; // 禁用"使用此ID"按钮
+                    connectionStatus.textContent = "连接错误";
+                    connectionStatus.style.color = "#f44336";
+                    status.textContent = '连接错误';
+                    updateUIState();
+                };
+                
+                socket.onmessage = handleMessage;
+            } catch (error) {
+                addToLog(`创建WebSocket连接失败: ${error.toString()}`);
+                connectionStatus.textContent = "连接失败";
+                connectionStatus.style.color = "#f44336";
+            }
+        }
+        
+        // 更新UI状态
+        function updateUIState() {
+            if (isRecording) {
+                startChatBtn.disabled = true;
+                stopBtn.disabled = false;
+                durationInput.disabled = true;
+                modelSelect.disabled = true;
+                apiUrlInput.disabled = true;
+                connectBtn.disabled = true;
+                createHistoryBtn.disabled = true;
+                useHistoryBtn.disabled = true;
+                historyIdInput.disabled = true;
+            } else {
+                startChatBtn.disabled = !(isConnected && historyId && modelSelect.value);
+                stopBtn.disabled = true;
+                durationInput.disabled = false;
+                modelSelect.disabled = false;
+                apiUrlInput.disabled = false;
+                connectBtn.disabled = false;
+                createHistoryBtn.disabled = !isConnected;
+                useHistoryBtn.disabled = !isConnected;
+                historyIdInput.disabled = false;
+            }
+        }
+        
+        // 连接到WebSocket服务器
+        function connectToServer() {
+            const wsUrl = apiUrlInput.value;
+            
+            // 验证URL格式
+            if (!wsUrl.startsWith('ws://') && !wsUrl.startsWith('wss://')) {
+                addToLog("错误：WebSocket URL必须以ws://或wss://开头");
+                connectionStatus.textContent = "URL错误";
+                connectionStatus.style.color = "#f44336";
+                return;
+            }
+            
+            addToLog(`尝试连接到: ${wsUrl}`);
+            initWebSocket(wsUrl);
+        }
+        
+        // 处理服务器消息
+        function handleMessage(event) {
+            const message = JSON.parse(event.data);
+            // 限制日志长度，防止过长消息
+            const logContent = message.content ? 
+                `${JSON.stringify(message).substring(0, 150)}...` : 
+                JSON.stringify(message).substring(0, 200);
+            addToLog(`收到: ${logContent}`);
+            
+            switch(message.type) {
+                case 'connection':
+                    clientId = message.client_id;
+                    addToLog(`已分配客户端ID: ${clientId}`);
+                    break;
+                
+                case 'recording':
+                    handleRecordingMessage(message);
+                    break;
+                
+                case 'params':
+                    if (message.status === "updated") {
+                        addToLog("参数更新成功");
+                    }
+                    break;
+                
+                case 'partial_result':
+                    // 处理流式识别的部分结果
+                    status.textContent = `识别中: ${message.text}`;
+                    break;
+                
+                case 'asr_result':
+                    // 显示语音识别结果
+                    addUserMessage(message.text);
+                    status.textContent = `已识别: ${message.text.substring(0, 30)}${message.text.length > 30 ? '...' : ''}`;
+                    break;
+                
+                case 'llm_stream_start':
+                    // 开始流式响应
+                    currentStreamMessage = createStreamBotMessage();
+                    break;
+                    
+                case 'llm_stream_chunk':
+                    // 流式响应片段
+                    if (currentStreamMessage) {
+                        appendToBotStreamMessage(message.content);
+                    }
+                    break;
+                    
+                case 'llm_stream_end':
+                    // 流式响应结束
+                    finishBotStreamMessage(message.text);
+                    currentStreamMessage = null;
+                    
+                    // 如果响应中包含history_id，确保我们更新本地存储的ID
+                    if (message.history_id && (!historyId || historyId !== message.history_id)) {
+                        historyId = message.history_id;
+                        historyIdInput.value = historyId;
+                        addToLog(`更新对话历史ID: ${historyId}`);
+                    }
+                    break;
+                
+                case 'llm_response':
+                    // 显示LLM响应并播放音频
+                    addBotMessage(message.text, message.audio_url);
+                    
+                    // 如果响应中包含history_id，确保我们更新本地存储的ID
+                    if (message.history_id && (!historyId || historyId !== message.history_id)) {
+                        historyId = message.history_id;
+                        historyIdInput.value = historyId;
+                        addToLog(`更新对话历史ID: ${historyId}`);
+                    }
+                    break;
+                
+                case 'error':
+                    addToLog(`错误: ${message.message}`);
+                    status.textContent = `错误: ${message.message}`;
+                    isRecording = false;
+                    updateUIState();
+                    
+                    // 自动重新连接
+                    if (message.message.includes("录音处理异常") || 
+                        message.message.includes("识别失败")) {
+                        addToLog("尝试重置连接状态...");
+                        setTimeout(() => {
+                            if (isConnected) {
+                                status.textContent = "请重试录音";
+                            }
+                        }, 1000);
+                    }
+                    break;
+            }
+        }
+        
+        // 处理录音相关消息
+        function handleRecordingMessage(message) {
+            switch(message.status) {
+                case 'started':
+                    isRecording = true;
+                    status.textContent = '录音已开始...';
+                    updateUIState();
+                    break;
+                
+                case 'progress':
+                    const percentage = message.percentage;
+                    progress.style.width = `${percentage}%`;
+                    progress.textContent = `${percentage}%`;
+                    status.textContent = `录音中... ${message.current}秒/${message.total}秒`;
+                    break;
+                
+                case 'info':
+                    status.textContent = message.message;
+                    addToLog(message.message);
+                    break;
+                
+                case 'stopped':
+                    isRecording = false;
+                    status.textContent = '录音已手动停止';
+                    updateUIState();
+                    break;
+                
+                case 'completed':
+                    isRecording = false;
+                    status.textContent = '录音完成，等待语音识别...';
+                    updateUIState();
+                    break;
+            }
+        }
+        
+        // 添加用户消息到对话框
+        function addUserMessage(text) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'message user-message';
+            
+            // 处理文本，确保安全显示包括表情符号在内的所有字符
+            const safeText = document.createTextNode(text);
+            messageDiv.appendChild(safeText);
+            
+            conversationElement.appendChild(messageDiv);
+            conversationElement.scrollTop = conversationElement.scrollHeight;
+        }
+        
+        // 添加机器人消息到对话框
+        function addBotMessage(text, audioUrl) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'message bot-message';
+            messageDiv.textContent = text;
+            
+            if (audioUrl) {
+                const audioControls = document.createElement('div');
+                audioControls.className = 'audio-controls';
+                
+                const audio = document.createElement('audio');
+                audio.controls = true;
+                audio.src = audioUrl;
+                audio.style.width = '100%';
+                
+                audioControls.appendChild(audio);
+                messageDiv.appendChild(audioControls);
+                
+                // 自动播放
+                audio.play().catch(e => {
+                    addToLog(`无法自动播放音频: ${e}`);
+                });
+            }
+            
+            conversationElement.appendChild(messageDiv);
+            conversationElement.scrollTop = conversationElement.scrollHeight;
+        }
+        
+        // 创建流式机器人消息
+        function createStreamBotMessage() {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'message bot-message';
+            messageDiv.textContent = '';
+            
+            conversationElement.appendChild(messageDiv);
+            conversationElement.scrollTop = conversationElement.scrollHeight;
+            
+            return messageDiv;
+        }
+        
+        // 向流式机器人消息添加内容
+        function appendToBotStreamMessage(content) {
+            if (currentStreamMessage) {
+                currentStreamMessage.textContent += content;
+                conversationElement.scrollTop = conversationElement.scrollHeight;
+            }
+        }
+        
+        // 完成流式机器人消息
+        function finishBotStreamMessage(finalText) {
+            if (currentStreamMessage) {
+                // 确保显示完整的最终文本
+                currentStreamMessage.textContent = finalText;
+                conversationElement.scrollTop = conversationElement.scrollHeight;
+            }
+        }
+        
+        // 添加日志
+        function addToLog(message) {
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString();
+            logElement.innerHTML += `<div>[${timeStr}] ${message}</div>`;
+            logElement.scrollTop = logElement.scrollHeight;
+        }
+        
+        // 获取可用模型
+        async function fetchAvailableModels() {
+            try {
+                // 修改为使用固定的8000端口，而不是当前窗口的端口
+                const baseUrl = window.location.protocol + '//' + window.location.hostname + ':8000';
+                addToLog(`正在从 ${baseUrl}/llm/available-models 获取模型列表...`);
+                
+                const response = await fetch(`${baseUrl}/llm/available-models`);
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    const models = data['available-models'];
+                    
+                    currentModels = models;
+                    
+                    // 更新模型选择下拉框
+                    modelSelect.innerHTML = '';
+                    models.forEach(model => {
+                        const option = document.createElement('option');
+                        option.value = model;
+                        option.textContent = model;
+                        modelSelect.appendChild(option);
+                    });
+                    
+                    modelSelect.disabled = false;
+                    
+                    if (models.length > 0) {
+                        addToLog(`已加载 ${models.length} 个可用模型`);
+                    } else {
+                        addToLog('未找到可用模型');
+                    }
+                } else {
+                    addToLog(`获取模型失败: ${response.status} ${response.statusText}`);
+                }
+            } catch (error) {
+                addToLog(`获取模型出错: ${error}`);
+            }
+        }
+        
+        // 使用输入的历史ID
+        function useHistoryId() {
+            const inputId = historyIdInput.value.trim();
+            
+            if (!inputId) {
+                addToLog('请输入有效的对话历史ID');
+                return;
+            }
+            
+            historyId = inputId;
+            addToLog(`使用对话历史ID: ${historyId}`);
+            
+            // 设置会话参数
+            if (modelSelect.value) {
+                setSessionParams();
+                startChatBtn.disabled = false;
+                updateUIState();
+            }
+        }
+        
+        // 创建新对话历史
+        async function createNewHistory() {
+            try {
+                // 修改为使用固定的8000端口，而不是当前窗口的端口
+                const baseUrl = window.location.protocol + '//' + window.location.hostname + ':8000';
+                addToLog(`正在请求 ${baseUrl}/llm/history/new 创建新对话...`);
+                
+                const response = await fetch(`${baseUrl}/llm/history/new`, {
+                    method: 'POST'
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    historyId = data.history_id;
+                    historyIdInput.value = historyId;
+                    
+                    // 设置会话参数
+                    setSessionParams();
+                    
+                    addToLog(`创建了新对话，ID: ${historyId}`);
+                    startChatBtn.disabled = !modelSelect.value;
+                    updateUIState();
+                } else {
+                    addToLog(`创建对话失败: ${response.status} ${response.statusText}`);
+                }
+            } catch (error) {
+                addToLog(`创建对话出错: ${error}`);
+                addToLog(`提示: 请确认后端服务器在 ${baseUrl} 上运行，且接口可以访问`);
+            }
+        }
+        
+        // 设置会话参数
+        function setSessionParams() {
+            if (!socket || socket.readyState !== WebSocket.OPEN) {
+                addToLog('WebSocket未连接');
+                return;
+            }
+            
+            if (!historyId) {
+                addToLog('警告: 未设置对话历史ID');
+                return;
+            }
+            
+            const model = modelSelect.value;
+            if (!model) {
+                addToLog('警告: 未选择模型');
+                return;
+            }
+            
+            const streamMode = streamModeCheckbox.checked;
+            
+            socket.send(JSON.stringify({
+                command: 'set_params',
+                model: model,
+                history_id: historyId,
+                stream_mode: streamMode
+            }));
+            
+            addToLog(`设置参数: 模型=${model}, 历史ID=${historyId}, 流式模式=${streamMode}`);
+        }
+        
+        // 开始语音聊天
+        function startVoiceChat() {
+            if (!socket || socket.readyState !== WebSocket.OPEN) {
+                addToLog('WebSocket未连接');
+                return;
+            }
+            
+            if (!historyId) {
+                addToLog('请先创建一个对话或输入对话历史ID');
+                status.textContent = '请先创建一个对话或输入对话历史ID';
+                return;
+            }
+            
+            if (!modelSelect.value) {
+                addToLog('请选择一个模型');
+                status.textContent = '请选择一个模型';
+                return;
+            }
+            
+            const duration = parseInt(durationInput.value);
+            const model = modelSelect.value;
+            const streamMode = streamModeCheckbox.checked;
+            
+            // 确保参数更新
+            setSessionParams();
+            
+            addToLog(`开始语音聊天: 模型=${model}, 历史ID=${historyId}, 录音时长=${duration}秒, 流式模式=${streamMode}`);
+            
+            // 重置进度条
+            progress.style.width = '0%';
+            progress.textContent = '0%';
+            
+            // 清除流式消息状态
+            currentStreamMessage = null;
+            
+            // 清除可能的错误状态
+            status.textContent = '准备录音...';
+            
+            // 发送开始语音聊天命令
+            socket.send(JSON.stringify({
+                command: 'start_voice_chat',
+                duration: duration,
+                model: model,
+                history_id: historyId,
+                stream_mode: streamMode,
+                server_url: "ws://127.0.0.1:8765"
+            }));
+        }
+        
+        // 停止录音
+        function stopRecording() {
+            if (!socket || socket.readyState !== WebSocket.OPEN || !isRecording) {
+                return;
+            }
+            
+            addToLog('手动停止录音');
+            socket.send(JSON.stringify({ command: 'stop_recording' }));
+        }
+        
+        // 添加事件监听器
+        startChatBtn.addEventListener('click', startVoiceChat);
+        stopBtn.addEventListener('click', stopRecording);
+        connectBtn.addEventListener('click', connectToServer);
+        createHistoryBtn.addEventListener('click', createNewHistory);
+        useHistoryBtn.addEventListener('click', useHistoryId);
+        modelSelect.addEventListener('change', () => {
+            updateUIState();
+            if (historyId) {
+                setSessionParams();
+            }
+        });
+        streamModeCheckbox.addEventListener('change', () => {
+            if (historyId) {
+                setSessionParams();
+            }
+        });
+        
+        // 初始化
+        addToLog('页面已加载，请点击"连接"按钮连接到WebSocket服务器');
+        updateUIState();
+    </script>
+</body>
+</html>

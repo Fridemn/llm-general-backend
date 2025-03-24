@@ -221,6 +221,8 @@
             addToLog(`正在连接到 ${wsUrl}...`);
             
             try {
+                // 详细记录连接过程，帮助诊断
+                addToLog(`创建WebSocket对象，URL: ${wsUrl}`);
                 socket = new WebSocket(wsUrl);
                 
                 socket.onopen = () => {
@@ -234,8 +236,24 @@
                     updateUIState();
                 };
                 
-                socket.onclose = () => {
-                    addToLog('WebSocket连接已关闭');
+                socket.onclose = (event) => {
+                    // 记录关闭事件的详细信息
+                    const reason = event.reason ? event.reason : "未提供关闭原因";
+                    const code = event.code;
+                    addToLog(`WebSocket连接已关闭 - 代码: ${code}, 原因: ${reason}`);
+                    
+                    // 添加诊断信息
+                    if (code === 1006) {
+                        addToLog("连接异常关闭 (代码1006)，可能的原因：");
+                        addToLog("- 服务器未运行或不可达");
+                        addToLog("- WebSocket URL路径错误");
+                        addToLog("- 浏览器网络问题");
+                        addToLog("- CORS策略限制 (如果服务器在不同的域)");
+                        
+                        // 尝试检查服务器状态
+                        checkServerStatus(wsUrl.replace('ws:', 'http:').replace('/ws/asr', '/ws/status'));
+                    }
+                    
                     isConnected = false;
                     startBtn.disabled = true;
                     stopBtn.disabled = true;
@@ -247,7 +265,11 @@
                 };
                 
                 socket.onerror = (error) => {
-                    addToLog(`WebSocket错误: ${error}`);
+                    // 提供更详细的错误信息
+                    const errorMsg = error.message || "未知错误";
+                    addToLog(`WebSocket错误: ${JSON.stringify(error)}`);
+                    addToLog(`尝试连接的URL: ${wsUrl}`);
+                    
                     isConnected = false;
                     startBtn.disabled = true;
                     stopBtn.disabled = true;
@@ -260,8 +282,37 @@
                 socket.onmessage = handleMessage;
             } catch (error) {
                 addToLog(`创建WebSocket连接失败: ${error.toString()}`);
+                addToLog(`详细错误: ${JSON.stringify(error)}`);
                 connectionStatus.textContent = "连接失败";
                 connectionStatus.style.color = "#f44336";
+            }
+        }
+        
+        // 使用HTTP检查服务器状态
+        async function checkServerStatus(statusUrl) {
+            try {
+                addToLog(`检查服务器状态: ${statusUrl}`);
+                const response = await fetch(statusUrl, {
+                    method: 'GET',
+                    mode: 'cors',
+                    headers: {
+                        'Accept': 'application/json'
+                    }
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    addToLog(`服务器状态检查成功: ${JSON.stringify(data)}`);
+                    addToLog("服务器可用，但WebSocket连接失败。请检查WebSocket路径是否正确。");
+                    return true;
+                } else {
+                    addToLog(`服务器状态检查失败: ${response.status} ${response.statusText}`);
+                    return false;
+                }
+            } catch (error) {
+                addToLog(`服务器状态检查错误: ${error}`);
+                addToLog("服务器不可达或未运行。请确保服务器已启动。");
+                return false;
             }
         }
         
@@ -295,6 +346,16 @@
         // 连接到WebSocket服务器
         function connectToServer() {
             const wsUrl = apiUrlInput.value;
+            
+            // 验证URL格式
+            if (!wsUrl.startsWith('ws://') && !wsUrl.startsWith('wss://')) {
+                addToLog("错误：WebSocket URL必须以ws://或wss://开头");
+                connectionStatus.textContent = "URL错误";
+                connectionStatus.style.color = "#f44336";
+                return;
+            }
+            
+            addToLog(`尝试连接到: ${wsUrl}`);
             initWebSocket(wsUrl);
         }
         
@@ -519,6 +580,7 @@
         
         // 初始化
         addToLog('页面已加载，请点击"连接"按钮连接到WebSocket服务器');
+        addToLog('默认WebSocket地址: ' + apiUrlInput.value);
         updateUIState();
     </script>
 </body>
