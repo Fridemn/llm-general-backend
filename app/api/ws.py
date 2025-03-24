@@ -11,7 +11,7 @@ import logging
 import traceback
 from typing import Dict, List, Any, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request, HTTPException, Depends
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
@@ -37,36 +37,19 @@ class RecordingRequest(BaseModel):
     batch_mode: Optional[bool] = False
     server_url: Optional[str] = "ws://127.0.0.1:8765"
 
-@api_ws.get("/", response_class=HTMLResponse)
-async def get_index(request: Request):
-    """提供Web界面"""
-    index_file = os.path.join(STATIC_DIR, "index.html")
-    
-    # 如果index.html不存在，返回简单的HTML提示
-    if not os.path.exists(index_file):
-        return HTMLResponse(content="""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>语音识别 WebSocket API</title>
-        </head>
-        <body>
-            <h1>语音识别 WebSocket API</h1>
-            <p>API已启动，但未找到static/index.html文件。</p>
-            <p>请创建此文件或使用WebSocket API直接通信。</p>
-        </body>
-        </html>
-        """)
-    
-    # 如果存在index.html，使用Jinja2渲染
-    return templates.TemplateResponse("index.html", {"request": request})
-
 @api_ws.websocket("/asr")
 async def websocket_endpoint(websocket: WebSocket):
     """语音识别WebSocket接口"""
     client_id = str(uuid.uuid4())
-    await websocket.accept()
-    active_connections[client_id] = websocket
+    
+    # 优化WebSocket连接处理，添加错误日志
+    try:
+        await websocket.accept()
+        logger.info(f"接受WebSocket连接: {client_id}")
+        active_connections[client_id] = websocket
+    except Exception as e:
+        logger.error(f"接受WebSocket连接失败: {client_id}, 错误: {str(e)}")
+        return
     
     # 创建客户端会话数据
     client_sessions[client_id] = {
@@ -95,13 +78,24 @@ async def websocket_endpoint(websocket: WebSocket):
         # 清理资源
         await cleanup_client(client_id)
     except Exception as e:
-        logger.error(f"处理WebSocket连接异常: {e}")
-        await send_message(websocket, {
-            "type": "error",
-            "message": str(e)
-        })
+        error_trace = traceback.format_exc()
+        logger.error(f"处理WebSocket连接异常: {e}\n{error_trace}")
+        try:
+            await send_message(websocket, {
+                "type": "error",
+                "message": str(e)
+            })
+        except:
+            pass
         # 清理资源
         await cleanup_client(client_id)
+
+async def send_message(websocket: WebSocket, message: Dict[str, Any]):
+    """发送消息到客户端"""
+    try:
+        await websocket.send_text(json.dumps(message))
+    except Exception as e:
+        logger.error(f"发送消息异常: {e}")
 
 async def process_message(client_id: str, websocket: WebSocket, data_text: str):
     """处理客户端消息"""
@@ -203,6 +197,95 @@ async def handle_start_recording(client_id: str, websocket: WebSocket, data: Dic
             "message": f"启动录音异常: {str(e)}"
         })
 
+async def handle_stop_recording(client_id: str, websocket: WebSocket):
+    """处理停止录音命令"""
+    session = client_sessions[client_id]
+    
+    if not session["recording_active"]:
+        await send_message(websocket, {
+            "type": "error",
+            "message": "当前没有进行中的录音"
+        })
+        return
+    
+    # 标记停止录音
+    session["recording_active"] = False
+    
+    # 发送停止消息
+    await send_message(websocket, {
+        "type": "recording",
+        "status": "stopped"
+    })
+
+async def handle_get_voiceprints(client_id: str, websocket: WebSocket):
+    """处理获取声纹列表命令"""
+    try:
+        # 创建临时客户端获取声纹列表
+        asr_client = AudioWebSocketClient("ws://127.0.0.1:8765")
+        if await asr_client.connect():
+            response = await asr_client.list_voiceprints()
+            
+            if response.get("success") and "voiceprints" in response:
+                await send_message(websocket, {
+                    "type": "voiceprints",
+                    "data": response["voiceprints"]
+                })
+            else:
+                await send_message(websocket, {
+                    "type": "error",
+                    "message": "获取声纹列表失败"
+                })
+                
+            # 关闭临时客户端
+            await asr_client.close()
+        else:
+            await send_message(websocket, {
+                "type": "error",
+                "message": "无法连接到语音服务器"
+            })
+    
+    except Exception as e:
+        logger.error(f"获取声纹列表异常: {e}")
+        await send_message(websocket, {
+            "type": "error",
+            "message": f"获取声纹列表异常: {str(e)}"
+        })
+
+async def handle_check_status(client_id: str, websocket: WebSocket):
+    """处理检查状态命令"""
+    session = client_sessions[client_id]
+    
+    status = {
+        "client_id": client_id,
+        "recording_active": session["recording_active"],
+        "has_results": len(session.get("recognition_results", [])) > 0,
+        "has_final_result": session.get("final_result") is not None
+    }
+    
+    # 如果有最终结果，一并发回前端
+    if session.get("final_result"):
+        await send_message(websocket, {
+            "type": "recording",
+            "status": "completed",
+            "result": session["final_result"]
+        })
+    else:
+        await send_message(websocket, {
+            "type": "status",
+            "data": status
+        })
+
+async def cleanup_client(client_id: str):
+    """清理客户端资源"""
+    if client_id in active_connections:
+        del active_connections[client_id]
+        
+    if client_id in client_sessions:
+        session = client_sessions[client_id]
+        if session["asr_client"]:
+            await session["asr_client"].close()
+        del client_sessions[client_id]
+
 async def perform_recording(client_id: str, websocket: WebSocket, duration: int, check_voiceprint: bool):
     """执行录音和识别任务"""
     session = client_sessions[client_id]
@@ -278,6 +361,7 @@ async def perform_recording(client_id: str, websocket: WebSocket, duration: int,
         # 清除旧的结果
         asr_client.final_result = None
         asr_client.streaming_results = []
+        asr_client.last_error = None
         
         try:
             # 发送识别请求
@@ -287,11 +371,30 @@ async def perform_recording(client_id: str, websocket: WebSocket, duration: int,
             await asyncio.sleep(2.5)
             
             # 检查是否有结果返回
-            if asr_client.final_result and "text" in asr_client.final_result:
+            if asr_client.final_result:
                 # 使用收到的结果
                 result = asr_client.final_result
-                success = True
-                logger.info(f"成功获取识别结果: {result.get('text', '')[:30]}...")
+                
+                # 调试日志，打印完整识别结果
+                logger.debug(f"完整识别结果: {json.dumps(result)}")
+                
+                # 检查结果中是否有错误信息
+                if "error" in result:
+                    # 有错误但仍然返回结果，让前端决定如何显示
+                    logger.info(f"识别完成但有错误: {result.get('error')}")
+                    success = True
+                else:
+                    success = True
+                    logger.info(f"成功获取识别结果: {result.get('text', '')[:30]}...")
+                    
+                # 确保结果中有实际文本，不是等待消息
+                if result.get("text") == "等待识别结果...":
+                    # 尝试检查是否有其他识别结果可用
+                    if asr_client.streaming_results:
+                        combined_text = " ".join([r["text"] for r in asr_client.streaming_results])
+                        result["text"] = combined_text
+                        result["segments"] = asr_client.streaming_results
+                        logger.info(f"更新为实际识别结果: {combined_text[:30]}...")
             else:
                 # 方法2：尝试流式处理数据方案
                 logger.info("尝试流式处理方案...")
@@ -309,18 +412,32 @@ async def perform_recording(client_id: str, websocket: WebSocket, duration: int,
                 # 等待处理完成
                 await asyncio.sleep(3.0)
                 
-                if asr_client.final_result and "text" in asr_client.final_result:
+                if asr_client.final_result:
                     result = asr_client.final_result
                     success = True
-                    logger.info(f"流式处理成功: {result.get('text', '')[:30]}...")
+                    # 即使有错误也返回结果
+                    if "error" in result:
+                        logger.info(f"流式处理完成但有错误: {result.get('error')}")
+                    else:
+                        logger.info(f"流式处理成功: {result.get('text', '')[:30]}...")
                 else:
                     # 方法3：从原始音频数据创建固定格式的结果
                     logger.warning("无法获取有效识别结果，创建默认结果")
-                    result = {
-                        "text": "无法识别语音内容，请重试",
-                        "user": "Unknown",
-                        "segments": [{"text": "无法识别语音内容，请重试", "user": "Unknown"}]
-                    }
+                    # 检查是否有声纹错误
+                    if asr_client.last_error:
+                        result = {
+                            "text": "语音已识别，但用户声纹验证失败",
+                            "user": asr_client.last_error.get("user", "Unknown"),
+                            "error": asr_client.last_error.get("error"),
+                            "similarity": asr_client.last_error.get("similarity", 0),
+                            "segments": [{"text": "语音已识别，但用户声纹验证失败", "user": asr_client.last_error.get("user", "Unknown")}]
+                        }
+                    else:
+                        result = {
+                            "text": "无法识别语音内容，请重试",
+                            "user": "Unknown",
+                            "segments": [{"text": "无法识别语音内容，请重试", "user": "Unknown"}]
+                        }
                     success = False
         
         except Exception as e:
@@ -337,6 +454,12 @@ async def perform_recording(client_id: str, websocket: WebSocket, duration: int,
             # 保存最终结果
             session["final_result"] = result
             
+            # 确保结果中有实际文本内容
+            if result.get("text") == "等待识别结果...":
+                # 如果没有找到实际文本，尝试从响应中获取
+                logger.warning("结果中没有实际文本，尝试替换为默认文本")
+                result["text"] = "未能获取有效的识别文本，但语音已处理"
+            
             # 确保segments字段存在
             if "segments" not in result or not isinstance(result["segments"], list):
                 result["segments"] = [{"text": result["text"], "user": result.get("user", "Unknown")}]
@@ -349,12 +472,22 @@ async def perform_recording(client_id: str, websocket: WebSocket, duration: int,
             })
             logger.info(f"成功完成识别并返回结果: {result['text'][:30]}...")
         else:
-            error_msg = "未能获取有效识别结果"
-            await send_message(websocket, {
-                "type": "error",
-                "message": f"语音识别失败: {error_msg}"
-            })
-            logger.error(f"语音识别失败: {error_msg}")
+            # 如果仍然有一些结果，即使失败也发送出去
+            if result and "text" in result:
+                await send_message(websocket, {
+                    "type": "recording",
+                    "status": "completed",
+                    "result": result,
+                    "warning": True
+                })
+                logger.info(f"返回有警告的结果: {result['text'][:30]}...")
+            else:
+                error_msg = "未能获取有效识别结果"
+                await send_message(websocket, {
+                    "type": "error",
+                    "message": f"语音识别失败: {error_msg}"
+                })
+                logger.error(f"语音识别失败: {error_msg}")
     
     except Exception as e:
         logger.error(f"录音过程异常: {e}")
@@ -409,7 +542,8 @@ async def perform_batch_recording(client_id: str, websocket: WebSocket, duration
         logger.info("录音完成，开始一次性识别")
         
         # 等待进度更新任务完成
-        await progress_task
+        if not progress_task.done():
+            await asyncio.wait_for(progress_task, timeout=0.5)
         
         # 通知客户端录音完成，开始识别
         await send_message(websocket, {
@@ -448,15 +582,20 @@ async def perform_batch_recording(client_id: str, websocket: WebSocket, duration
         await asyncio.sleep(2.0)
         
         # 获取结果
-        if asr_client.final_result and "error" not in asr_client.final_result:
+        if asr_client.final_result:
             result = asr_client.final_result
             
             # 保存最终结果
             session["final_result"] = result
             
+            # 确保结果中有实际文本内容
+            if result.get("text") == "等待识别结果...":
+                logger.warning("结果中没有实际文本，尝试替换为默认文本")
+                result["text"] = "未能获取有效的识别文本，但语音已处理"
+            
             # 为了保持一致性，制作一个segments格式，但只包含一个段落
             if "segments" not in result:
-                result["segments"] = [{"text": result["text"], "user": result["user"]}]
+                result["segments"] = [{"text": result["text"], "user": result.get("user", "unknown")}]
             
             # 发送完成消息
             await send_message(websocket, {
@@ -465,7 +604,7 @@ async def perform_batch_recording(client_id: str, websocket: WebSocket, duration
                 "result": result
             })
         else:
-            error = "未收到识别结果" if not asr_client.final_result else asr_client.final_result.get("error", "识别失败")
+            error = "未收到识别结果"
             await send_message(websocket, {
                 "type": "error",
                 "message": f"语音识别失败: {error}"
@@ -485,94 +624,6 @@ async def perform_batch_recording(client_id: str, websocket: WebSocket, duration
             await asr_client.close()
             session["asr_client"] = None
 
-async def handle_stop_recording(client_id: str, websocket: WebSocket):
-    """处理停止录音命令"""
-    session = client_sessions[client_id]
-    
-    if not session["recording_active"]:
-        await send_message(websocket, {
-            "type": "error",
-            "message": "当前没有进行中的录音"
-        })
-        return
-    
-    # 标记停止录音
-    session["recording_active"] = False
-    
-    # 发送停止消息
-    await send_message(websocket, {
-        "type": "recording",
-        "status": "stopped"
-    })
-
-async def handle_get_voiceprints(client_id: str, websocket: WebSocket):
-    """处理获取声纹列表命令"""
-    try:
-        # 创建临时客户端获取声纹列表
-        asr_client = AudioWebSocketClient("ws://127.0.0.1:8765")
-        if await asr_client.connect():
-            response = await asr_client.list_voiceprints()
-            
-            if response.get("success") and "voiceprints" in response:
-                await send_message(websocket, {
-                    "type": "voiceprints",
-                    "data": response["voiceprints"]
-                })
-            else:
-                await send_message(websocket, {
-                    "type": "error",
-                    "message": "获取声纹列表失败"
-                })
-                
-            # 关闭临时客户端
-            await asr_client.close()
-        else:
-            await send_message(websocket, {
-                "type": "error",
-                "message": "无法连接到语音服务器"
-            })
-    
-    except Exception as e:
-        logger.error(f"获取声纹列表异常: {e}")
-        await send_message(websocket, {
-            "type": "error",
-            "message": f"获取声纹列表异常: {str(e)}"
-        })
-
-async def handle_check_status(client_id: str, websocket: WebSocket):
-    """处理检查状态命令"""
-    session = client_sessions[client_id]
-    
-    status = {
-        "client_id": client_id,
-        "recording_active": session["recording_active"],
-        "has_results": len(session["recognition_results"]) > 0,
-        "has_final_result": session["final_result"] is not None
-    }
-    
-    await send_message(websocket, {
-        "type": "status",
-        "data": status
-    })
-
-async def cleanup_client(client_id: str):
-    """清理客户端资源"""
-    if client_id in active_connections:
-        del active_connections[client_id]
-        
-    if client_id in client_sessions:
-        session = client_sessions[client_id]
-        if session["asr_client"]:
-            await session["asr_client"].close()
-        del client_sessions[client_id]
-
-async def send_message(websocket: WebSocket, message: Dict[str, Any]):
-    """发送消息到客户端"""
-    try:
-        await websocket.send_text(json.dumps(message))
-    except Exception as e:
-        logger.error(f"发送消息异常: {e}")
-
 @api_ws.get("/status")
 async def api_status():
     """API状态检查端点"""
@@ -586,7 +637,8 @@ async def api_status():
 @api_ws.on_event("startup")
 async def startup_event():
     logger.info("语音识别WebSocket服务启动")
-    logger.info("WebSocket服务可通过 /ws/asr 接口访问")
+    logger.info("WebSocket服务可通过 ws://[host]/ws/asr 接口访问")
+    logger.info("前端界面可独立部署，使用static/index.html")
 
 @api_ws.on_event("shutdown")
 async def shutdown_event():

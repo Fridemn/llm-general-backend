@@ -27,6 +27,11 @@ class AudioWebSocketClient:
         self.streaming_results = []
         self.final_result = None
         self.streaming_complete = asyncio.Event()
+        
+        # 添加错误状态跟踪
+        self.last_error = None
+        self.last_request_id = None
+        self.voiceprint_result = None
     
     async def connect(self):
         """连接到WebSocket服务器"""
@@ -68,6 +73,7 @@ class AudioWebSocketClient:
         elif msg_type == "response":
             success = data.get("success", False)
             request_id = data.get("request_id")
+            self.last_request_id = request_id
             
             if success:
                 print(f"请求 {request_id} 成功")
@@ -76,8 +82,43 @@ class AudioWebSocketClient:
                     user = data.get("user", "unknown")
                     print(f"识别文本: {text}")
                     print(f"用户: {user}")
+                    
+                    # 记录声纹结果
+                    if user != "unknown":
+                        self.voiceprint_result = {"success": True, "user": user}
+                    
+                    # 添加：直接保存识别结果到final_result
+                    if not self.final_result or self.final_result.get("text") == "等待识别结果...":
+                        self.final_result = {
+                            "text": text,
+                            "user": user,
+                            "segments": [{"text": text, "user": user}]
+                        }
             else:
-                print(f"请求 {request_id} 失败: {data.get('error', '未知错误')}")
+                error_msg = data.get("error", "未知错误")
+                print(f"请求 {request_id} 失败: {error_msg}")
+                
+                # 记录错误信息
+                self.last_error = {
+                    "request_id": request_id,
+                    "error": error_msg,
+                    "user": data.get("user", "Unknown"),
+                    "similarity": data.get("similarity", 0)
+                }
+                
+                # 记录声纹失败结果
+                if "Unregistered user" in error_msg:
+                    self.voiceprint_result = {"success": False, "error": error_msg}
+                    
+                # 对于声纹错误，创建一个特殊的识别结果
+                if not self.final_result and "user" in data:
+                    self.final_result = {
+                        "text": "已识别语音，但用户未注册声纹",
+                        "user": "未注册用户",
+                        "error": error_msg,
+                        "similarity": data.get("similarity", 0),
+                        "segments": []
+                    }
         
         elif msg_type == "event":
             event = data.get("event")
@@ -99,11 +140,23 @@ class AudioWebSocketClient:
                     # 将所有识别结果合并为一个完整文本
                     combined_text = " ".join([result["text"] for result in self.streaming_results])
                     last_user = self.streaming_results[-1]["user"]
+                    
+                    # 检查是否存在声纹错误
+                    if self.last_error and "Unregistered user" in self.last_error.get("error", ""):
+                        last_user = "未注册用户"
+                        error_info = {"error": self.last_error.get("error"), "similarity": self.last_error.get("similarity")}
+                    else:
+                        error_info = None
+                    
                     self.final_result = {
                         "text": combined_text,
                         "user": last_user,
                         "segments": self.streaming_results
                     }
+                    
+                    # 如果有错误信息，添加到结果中
+                    if error_info:
+                        self.final_result.update(error_info)
                     
                     print("\n=== 最终识别结果 ===")
                     print(f"用户: {last_user}")
@@ -162,8 +215,14 @@ class AudioWebSocketClient:
         
         # 重置结果状态
         self.streaming_results = []
-        self.final_result = None
+        self.final_result = {
+            "text": "等待识别结果...",
+            "user": check_voiceprint and "检测中..." or "无声纹识别",
+            "segments": []
+        }
         self.streaming_complete.clear()
+        self.last_error = None
+        self.voiceprint_result = None
         
         # 等待服务器处理并返回结果
         try:
@@ -174,18 +233,34 @@ class AudioWebSocketClient:
             if self.streaming_results:
                 combined_text = " ".join([result["text"] for result in self.streaming_results])
                 last_user = self.streaming_results[-1]["user"]
+                
+                # 检查是否有声纹错误，覆盖用户信息
+                if self.last_error and "user" in self.last_error:
+                    if "Unregistered user" in self.last_error.get("error", ""):
+                        last_user = "未注册用户"
+                
                 self.final_result = {
                     "text": combined_text,
                     "user": last_user,
                     "segments": self.streaming_results
                 }
-            # 如果没有结果，创建一个基本结果
-            elif not self.final_result:
+                
+                # 如果有声纹错误，添加到结果中
+                if self.last_error:
+                    self.final_result.update({
+                        "error": self.last_error.get("error"),
+                        "similarity": self.last_error.get("similarity", 0)
+                    })
+            # 如果没有结果但有错误，创建一个错误结果
+            elif self.last_error:
                 self.final_result = {
-                    "text": "识别结果将在服务器处理完成后显示",
-                    "user": check_voiceprint and "检测中..." or "无声纹识别",
+                    "text": "已识别语音，但出现声纹验证错误",
+                    "user": self.last_error.get("user", "未知"),
+                    "error": self.last_error.get("error", "未知错误"),
+                    "similarity": self.last_error.get("similarity", 0),
                     "segments": []
                 }
+            # 如果有文本识别成功的响应，已在handle_message中创建了final_result
         except Exception as e:
             print(f"等待识别结果时发生错误: {str(e)}")
         

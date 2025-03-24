@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WiredEcho语音识别</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            line-height: 1.6;
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .card {
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .button {
+            background-color: #4CAF50;
+            border: none;
+            color: white;
+            padding: 10px 20px;
+            text-align: center;
+            text-decoration: none;
+            display: inline-block;
+            font-size: 16px;
+            margin: 4px 2px;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+        .button.stop {
+            background-color: #f44336;
+        }
+        .button.disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        .progress-bar {
+            width: 100%;
+            background-color: #e0e0e0;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+        .progress {
+            height: 20px;
+            background-color: #4CAF50;
+            border-radius: 5px;
+            width: 0%;
+            transition: width 0.3s;
+            text-align: center;
+            color: white;
+            line-height: 20px;
+        }
+        .result {
+            margin-top: 20px;
+            border-left: 4px solid #2196F3;
+            padding-left: 10px;
+        }
+        .log {
+            height: 200px;
+            overflow-y: auto;
+            border: 1px solid #ddd;
+            padding: 10px;
+            border-radius: 4px;
+            background-color: #f9f9f9;
+            font-family: monospace;
+        }
+        .settings {
+            margin-bottom: 20px;
+        }
+        .checkbox-container {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .checkbox-container input {
+            margin-right: 10px;
+        }
+        .error-message {
+            color: #f44336;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        .warning-message {
+            color: #ff9800;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        .similarity-indicator {
+            display: inline-block;
+            margin-left: 10px;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 12px;
+            color: white;
+        }
+        .similarity-high {
+            background-color: #4CAF50;
+        }
+        .similarity-medium {
+            background-color: #ff9800;
+        }
+        .similarity-low {
+            background-color: #f44336;
+        }
+    </style>
+</head>
+<body>
+    <h1>WiredEcho语音识别演示</h1>
+    
+    <div class="card">
+        <h2>连接设置</h2>
+        <div class="settings">
+            <div>
+                <label for="api-url">WebSocket API地址:</label>
+                <input type="text" id="api-url" value="ws://localhost:8000/ws/asr" style="width:300px;">
+                <button id="connect-btn" class="button">连接</button>
+            </div>
+            <div>
+                <span id="connection-status" style="margin-left: 10px; font-weight: bold; color: #f44336;">未连接</span>
+            </div>
+        </div>
+    </div>
+    
+    <div class="card">
+        <h2>录音设置</h2>
+        <div class="settings">
+            <div>
+                <label for="duration">录音时长 (秒):</label>
+                <input type="number" id="duration" min="1" max="60" value="5">
+            </div>
+            <div class="checkbox-container">
+                <input type="checkbox" id="check-voiceprint" checked>
+                <label for="check-voiceprint">启用声纹识别</label>
+            </div>
+            <div class="checkbox-container">
+                <input type="checkbox" id="batch-mode">
+                <label for="batch-mode">批量模式 (录音完成后再识别)</label>
+            </div>
+            <div>
+                <label for="server-url">语音服务器地址:</label>
+                <input type="text" id="server-url" value="ws://127.0.0.1:8765" style="width:300px;">
+            </div>
+        </div>
+        
+        <button id="start-btn" class="button" disabled>开始录音</button>
+        <button id="stop-btn" class="button stop" disabled>停止录音</button>
+    </div>
+    
+    <div class="card">
+        <h2>录音进度</h2>
+        <div class="progress-bar">
+            <div id="progress" class="progress">0%</div>
+        </div>
+        <div id="status">待机中</div>
+    </div>
+    
+    <div class="card">
+        <h2>识别结果</h2>
+        <div id="result" class="result">
+            <p>等待识别...</p>
+        </div>
+    </div>
+    
+    <div class="card">
+        <h2>声纹列表</h2>
+        <button id="get-voiceprints" class="button">获取声纹列表</button>
+        <div id="voiceprints" class="result">
+            <p>点击按钮获取声纹列表</p>
+        </div>
+    </div>
+    
+    <div class="card">
+        <h2>日志</h2>
+        <div id="log" class="log"></div>
+    </div>
+
+    <script>
+        // WebSocket连接
+        let socket;
+        let clientId;
+        let isRecording = false;
+        let isConnected = false;
+        
+        // 元素引用
+        const startBtn = document.getElementById('start-btn');
+        const stopBtn = document.getElementById('stop-btn');
+        const connectBtn = document.getElementById('connect-btn');
+        const connectionStatus = document.getElementById('connection-status');
+        const progress = document.getElementById('progress');
+        const status = document.getElementById('status');
+        const result = document.getElementById('result');
+        const logElement = document.getElementById('log');
+        const getVoiceprintsBtn = document.getElementById('get-voiceprints');
+        const voiceprintsElement = document.getElementById('voiceprints');
+        
+        // 设置元素
+        const apiUrlInput = document.getElementById('api-url');
+        const durationInput = document.getElementById('duration');
+        const checkVoiceprintInput = document.getElementById('check-voiceprint');
+        const batchModeInput = document.getElementById('batch-mode');
+        const serverUrlInput = document.getElementById('server-url');
+        
+        // 初始化WebSocket连接
+        function initWebSocket(wsUrl) {
+            if (socket && socket.readyState !== WebSocket.CLOSED) {
+                socket.close();
+            }
+            
+            connectionStatus.textContent = "正在连接...";
+            connectionStatus.style.color = "#ff9800";
+            
+            addToLog(`正在连接到 ${wsUrl}...`);
+            
+            try {
+                socket = new WebSocket(wsUrl);
+                
+                socket.onopen = () => {
+                    addToLog('WebSocket连接已建立');
+                    isConnected = true;
+                    startBtn.disabled = false;
+                    connectBtn.textContent = '重新连接';
+                    connectionStatus.textContent = "已连接";
+                    connectionStatus.style.color = "#4CAF50";
+                    status.textContent = '已连接到服务器，可以开始录音';
+                    updateUIState();
+                };
+                
+                socket.onclose = () => {
+                    addToLog('WebSocket连接已关闭');
+                    isConnected = false;
+                    startBtn.disabled = true;
+                    stopBtn.disabled = true;
+                    isRecording = false;
+                    connectionStatus.textContent = "未连接";
+                    connectionStatus.style.color = "#f44336";
+                    status.textContent = '未连接';
+                    updateUIState();
+                };
+                
+                socket.onerror = (error) => {
+                    addToLog(`WebSocket错误: ${error}`);
+                    isConnected = false;
+                    startBtn.disabled = true;
+                    stopBtn.disabled = true;
+                    connectionStatus.textContent = "连接错误";
+                    connectionStatus.style.color = "#f44336";
+                    status.textContent = '连接错误';
+                    updateUIState();
+                };
+                
+                socket.onmessage = handleMessage;
+            } catch (error) {
+                addToLog(`创建WebSocket连接失败: ${error.toString()}`);
+                connectionStatus.textContent = "连接失败";
+                connectionStatus.style.color = "#f44336";
+            }
+        }
+        
+        // 更新UI状态
+        function updateUIState() {
+            if (isRecording) {
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+                durationInput.disabled = true;
+                checkVoiceprintInput.disabled = true;
+                serverUrlInput.disabled = true;
+                apiUrlInput.disabled = true;
+                connectBtn.disabled = true;
+                getVoiceprintsBtn.disabled = true;
+            } else {
+                startBtn.disabled = !isConnected;
+                stopBtn.disabled = true;
+                durationInput.disabled = false;
+                checkVoiceprintInput.disabled = false;
+                serverUrlInput.disabled = false;
+                apiUrlInput.disabled = false;
+                connectBtn.disabled = false;
+                getVoiceprintsBtn.disabled = !isConnected;
+                
+                // 重置进度条
+                progress.style.width = '0%';
+                progress.textContent = '0%';
+            }
+        }
+        
+        // 连接到WebSocket服务器
+        function connectToServer() {
+            const wsUrl = apiUrlInput.value;
+            initWebSocket(wsUrl);
+        }
+        
+        // 处理服务器消息
+        function handleMessage(event) {
+            const message = JSON.parse(event.data);
+            addToLog(`收到: ${JSON.stringify(message)}`);
+            
+            switch(message.type) {
+                case 'connection':
+                    clientId = message.client_id;
+                    addToLog(`已分配客户端ID: ${clientId}`);
+                    break;
+                
+                case 'recording':
+                    handleRecordingMessage(message);
+                    break;
+                
+                case 'voiceprints':
+                    displayVoiceprints(message.data);
+                    break;
+                
+                case 'error':
+                    addToLog(`错误: ${message.message}`);
+                    status.textContent = `错误: ${message.message}`;
+                    isRecording = false;
+                    updateUIState();
+                    break;
+            }
+        }
+        
+        // 处理录音相关消息
+        function handleRecordingMessage(message) {
+            switch(message.status) {
+                case 'started':
+                    isRecording = true;
+                    status.textContent = '录音已开始...';
+                    updateUIState();
+                    break;
+                
+                case 'progress':
+                    const percentage = message.percentage;
+                    progress.style.width = `${percentage}%`;
+                    progress.textContent = `${percentage}%`;
+                    status.textContent = `录音中... ${message.current}秒/${message.total}秒`;
+                    break;
+                
+                case 'info':
+                    status.textContent = message.message;
+                    addToLog(message.message);
+                    break;
+                
+                case 'stopped':
+                    isRecording = false;
+                    status.textContent = '录音已手动停止';
+                    updateUIState();
+                    break;
+                
+                case 'completed':
+                    isRecording = false;
+                    
+                    // 检查结果是否为等待消息
+                    const isWaiting = message.result && 
+                        (message.result.text === "等待识别结果..." || 
+                         message.result.text === "识别结果将在服务器处理完成后显示");
+                         
+                    status.textContent = isWaiting
+                        ? '等待最终识别结果...'
+                        : (message.warning ? '录音完成，但识别有问题' : '录音完成，识别结束');
+                    
+                    displayResults(message.result);
+                    updateUIState();
+                    break;
+            }
+        }
+        
+        // 显示识别结果
+        function displayResults(resultData) {
+            const text = resultData.text;
+            const user = resultData.user;
+            const segments = resultData.segments || [];
+            const error = resultData.error;
+            const similarity = resultData.similarity;
+            
+            let html = '';
+            
+            // 显示错误信息（如果有）
+            if (error) {
+                html += `<div class="error-message">错误: ${error}</div>`;
+            }
+            
+            // 用户信息部分，包括相似度
+            html += `<h3>识别结果:</h3>`;
+            html += `<p><strong>识别用户:</strong> ${user}`;
+            
+            // 如果有相似度，显示相似度指标
+            if (similarity !== undefined) {
+                let similarityClass = 'similarity-low';
+                if (similarity > 0.8) similarityClass = 'similarity-high';
+                else if (similarity > 0.6) similarityClass = 'similarity-medium';
+                
+                html += `<span class="${similarityClass} similarity-indicator">相似度: ${(similarity * 100).toFixed(1)}%</span>`;
+            }
+            html += `</p>`;
+            
+            // 文本内容 - 检查是否是等待消息
+            if (text === "等待识别结果..." || text === "识别结果将在服务器处理完成后显示") {
+                html += `<p><strong>完整文本:</strong> <i>正在等待识别结果...</i></p>`;
+                html += `<div class="warning-message">正在处理语音，请稍候...</div>`;
+                
+                // 如果是等待消息，5秒后尝试重新获取状态
+                setTimeout(() => {
+                    if (clientId) {
+                        checkStatus();
+                    }
+                }, 5000);
+            } else {
+                html += `<p><strong>完整文本:</strong> ${text}</p>`;
+                
+                // 如果有分段结果
+                if (segments.length > 0) {
+                    html += `<h4>分段结果 (${segments.length}段):</h4><ol>`;
+                    segments.forEach(segment => {
+                        html += `<li>${segment.text}</li>`;
+                    });
+                    html += '</ol>';
+                }
+            }
+            
+            result.innerHTML = html;
+        }
+        
+        // 添加日志
+        function addToLog(message) {
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString();
+            logElement.innerHTML += `<div>[${timeStr}] ${message}</div>`;
+            logElement.scrollTop = logElement.scrollHeight;
+        }
+        
+        // 检查状态函数
+        function checkStatus() {
+            if (!socket || socket.readyState !== WebSocket.OPEN) {
+                addToLog('WebSocket未连接');
+                return;
+            }
+            
+            addToLog('检查识别状态...');
+            socket.send(JSON.stringify({ command: 'check_status' }));
+        }
+        
+        // 显示声纹列表
+        function displayVoiceprints(voiceprints) {
+            if (!voiceprints || voiceprints.length === 0) {
+                voiceprintsElement.innerHTML = '<p>声纹库为空</p>';
+                return;
+            }
+            
+            let html = '<table style="width:100%; border-collapse: collapse;">';
+            html += '<tr><th style="border:1px solid #ddd; padding:8px; text-align:left;">ID</th><th style="border:1px solid #ddd; padding:8px; text-align:left;">用户名</th></tr>';
+            
+            voiceprints.forEach(vp => {
+                html += `<tr>
+                    <td style="border:1px solid #ddd; padding:8px;">${vp.id}</td>
+                    <td style="border:1px solid #ddd; padding:8px;">${vp.person_name}</td>
+                </tr>`;
+            });
+            
+            html += '</table>';
+            voiceprintsElement.innerHTML = html;
+        }
+        
+        // 开始录音
+        function startRecording() {
+            if (!socket || socket.readyState !== WebSocket.OPEN) {
+                addToLog('WebSocket未连接');
+                return;
+            }
+            
+            const duration = parseInt(durationInput.value);
+            const checkVoiceprint = checkVoiceprintInput.checked;
+            const batchMode = batchModeInput.checked;
+            const serverUrl = serverUrlInput.value;
+            
+            addToLog(`开始录音 ${duration}秒, 声纹识别: ${checkVoiceprint ? '开启' : '关闭'}, 模式: ${batchMode ? '批量' : '流式'}`);
+            
+            socket.send(JSON.stringify({
+                command: 'start_recording',
+                duration: duration,
+                check_voiceprint: checkVoiceprint,
+                batch_mode: batchMode,
+                server_url: serverUrl
+            }));
+        }
+        
+        // 停止录音
+        function stopRecording() {
+            if (!socket || socket.readyState !== WebSocket.OPEN || !isRecording) {
+                return;
+            }
+            
+            addToLog('手动停止录音');
+            socket.send(JSON.stringify({ command: 'stop_recording' }));
+        }
+        
+        // 获取声纹列表
+        function getVoiceprints() {
+            if (!socket || socket.readyState !== WebSocket.OPEN) {
+                addToLog('WebSocket未连接');
+                return;
+            }
+            
+            addToLog('获取声纹列表');
+            socket.send(JSON.stringify({ command: 'get_voiceprints' }));
+        }
+        
+        // 添加事件监听器
+        startBtn.addEventListener('click', startRecording);
+        stopBtn.addEventListener('click', stopRecording);
+        connectBtn.addEventListener('click', connectToServer);
+        getVoiceprintsBtn.addEventListener('click', getVoiceprints);
+        
+        // 初始化
+        addToLog('页面已加载，请点击"连接"按钮连接到WebSocket服务器');
+        updateUIState();
+    </script>
+</body>
+</html>
