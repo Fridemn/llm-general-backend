@@ -1,0 +1,1006 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket TTS 演示</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            line-height: 1.6;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        input, textarea, select, button {
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 16px;
+        }
+        textarea {
+            min-height: 100px;
+        }
+        button {
+            cursor: pointer;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 15px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        .status {
+            padding: 10px;
+            border-radius: 4px;
+            margin-top: 10px;
+        }
+        .connected {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .disconnected {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        .log {
+            padding: 10px;
+            background-color: #f8f9fa;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            max-height: 200px;
+            overflow-y: auto;
+            font-family: monospace;
+        }
+    </style>
+</head>
+<body>
+    <h1>WebSocket TTS 演示</h1>
+    
+    <div class="container">
+        <div class="form-group">
+            <label for="serverUrl">WebSocket 服务器地址:</label>
+            <input type="text" id="serverUrl" value="ws://localhost:8000/ws/tts">
+        </div>
+        
+        <div>
+            <button id="connectBtn">连接</button>
+            <button id="disconnectBtn" disabled>断开连接</button>
+            <div id="connectionStatus" class="status disconnected">未连接</div>
+        </div>
+        
+        <div class="form-group">
+            <label for="textToSpeech">要转换的文本:</label>
+            <textarea id="textToSpeech" placeholder="输入要转换为语音的文本...">你好，这是一段文本转语音的测试。</textarea>
+        </div>
+        
+        <div class="form-group">
+            <label for="provider">TTS提供者:</label>
+            <select id="provider">
+                <option value="gsvi">GSVI</option>
+            </select>
+        </div>
+        
+        <div class="form-group">
+            <label for="apiBase">API基础URL:</label>
+            <input type="text" id="apiBase" value="http://127.0.0.1:5000">
+        </div>
+        
+        <div class="form-group">
+            <label for="character">角色(可选):</label>
+            <input type="text" id="character" placeholder="角色名称">
+        </div>
+        
+        <div class="form-group">
+            <label for="emotion">情感(可选):</label>
+            <input type="text" id="emotion" placeholder="情感">
+        </div>
+        
+        <button id="convertBtn" disabled>转换为语音</button>
+        
+        <div>
+            <h3>音频输出:</h3>
+            <audio id="audioOutput" controls></audio>
+            <button id="downloadBtn" disabled>下载音频</button>
+        </div>
+        
+        <div>
+            <h3>日志:</h3>
+            <div id="log" class="log"></div>
+        </div>
+    </div>
+
+    <script>
+        // 获取DOM元素
+        const serverUrlInput = document.getElementById('serverUrl');
+        const connectBtn = document.getElementById('connectBtn');
+        const disconnectBtn = document.getElementById('disconnectBtn');
+        const connectionStatus = document.getElementById('connectionStatus');
+        const textToSpeech = document.getElementById('textToSpeech');
+        const provider = document.getElementById('provider');
+        const apiBase = document.getElementById('apiBase');
+        const character = document.getElementById('character');
+        const emotion = document.getElementById('emotion');
+        const convertBtn = document.getElementById('convertBtn');
+        const audioOutput = document.getElementById('audioOutput');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const logElement = document.getElementById('log');
+        
+        let socket = null;
+        let clientId = null;
+        let audioBlob = null;
+        
+        // 记录日志
+        function log(message) {
+            const now = new Date().toLocaleTimeString();
+            logElement.innerHTML += `<div>[${now}] ${message}</div>`;
+            logElement.scrollTop = logElement.scrollHeight;
+        }
+        
+        // 连接WebSocket
+        connectBtn.addEventListener('click', connect);
+        
+        // 全局变量，用于保存最后一次连接的地址
+        let lastConnectedUrl = '';
+        
+        // 修改连接逻辑，添加重用连接功能
+        function connect() {
+            const url = serverUrlInput.value.trim();
+            if (!url) {
+                log('错误: 服务器地址不能为空');
+                return;
+            }
+            
+            // 如果已有活跃连接且地址相同，直接重用
+            if (socket && socket.readyState === WebSocket.OPEN && lastConnectedUrl === url) {
+                log('已有活跃连接，无需重新连接');
+                updateUIForConnected();
+                return;
+            }
+            
+            // 确保之前的连接已关闭
+            if (socket && socket.readyState !== WebSocket.CLOSED) {
+                try {
+                    log('关闭旧连接...');
+                    socket.close();
+                } catch (e) {
+                    console.error('关闭旧连接时出错:', e);
+                }
+            }
+            
+            try {
+                log('正在连接到WebSocket服务器...');
+                connectBtn.disabled = true; // 防止重复点击
+                
+                // 创建新连接
+                socket = new WebSocket(url);
+                lastConnectedUrl = url;
+                
+                // 增加连接超时处理
+                const connectionTimeout = setTimeout(() => {
+                    if (socket && socket.readyState !== WebSocket.OPEN) {
+                        log('连接超时');
+                        socket.close();
+                        connectBtn.disabled = false;
+                    }
+                }, 5000);
+                
+                socket.onopen = function() {
+                    clearTimeout(connectionTimeout);
+                    log('WebSocket连接已打开');
+                    updateUIForConnected();
+                    
+                    // 发送初始化消息，包含客户端信息
+                    sendInitMessage();
+                    
+                    // 添加保活机制
+                    startPingInterval();
+                };
+                
+                // 改进消息处理
+                socket.onmessage = function(event) {
+                    // 重置心跳计时器，收到任何消息都表示连接活跃
+                    resetHeartbeatTimer();
+                    
+                    try {
+                        const data = JSON.parse(event.data);
+                        
+                        // 静默处理ping/pong等消息
+                        if (isPingPongMessage(data)) {
+                            console.log(`收到心跳消息: ${JSON.stringify(data)}`);
+                            return;
+                        }
+                        
+                        // 记录收到的其他消息
+                        log(`收到消息: ${data.status || data.type || '未知类型'}`);
+                        
+                        // 处理音频响应
+                        if (data.audio) {
+                            handleAudioResponse(data);
+                        }
+                        
+                        // 处理状态消息
+                        if (data.status) {
+                            handleStatusMessage(data);
+                        }
+                        
+                        // 处理错误消息
+                        if (data.error) {
+                            log(`错误: ${data.error}`);
+                            enableControls();
+                        }
+                    } catch (e) {
+                        log(`处理消息时出错: ${e.message}`);
+                        console.error('消息处理错误:', e);
+                    }
+                };
+                
+                // 改进连接关闭处理
+                socket.onclose = function(event) {
+                    stopHeartbeat();
+                    
+                    // 记录关闭原因
+                    let message = `WebSocket连接已关闭`;
+                    if (event.code) {
+                        message += ` (代码: ${event.code})`;
+                    }
+                    if (event.reason) {
+                        message += ` 原因: ${event.reason}`;
+                    }
+                    log(message);
+                    
+                    // 重置UI状态
+                    updateUIForDisconnected();
+                    
+                    // 不立即设置socket为null，允许在某些情况下尝试重新连接
+                    // socket = null;
+                };
+                
+                // 发生错误时的处理
+                socket.onerror = function(error) {
+                    log('WebSocket发生错误');
+                    console.error('WebSocket错误:', error);
+                    connectBtn.disabled = false;
+                };
+                
+            } catch (error) {
+                log(`创建WebSocket连接时出错: ${error.message}`);
+                console.error('连接错误:', error);
+                connectBtn.disabled = false;
+            }
+        }
+        
+        // 检查是否为心跳/保活相关消息
+        function isPingPongMessage(data) {
+            return (
+                data.pong === true || 
+                data.ping === true || 
+                data.ping_check === true || 
+                data.keep_alive === true ||
+                (data.type && ['pong', 'ping', 'keep_alive', 'heartbeat'].includes(data.type))
+            );
+        }
+        
+        // 发送初始化消息
+        function sendInitMessage() {
+            if (!socket || socket.readyState !== WebSocket.OPEN) return;
+            
+            try {
+                socket.send(JSON.stringify({
+                    init: true,
+                    client: "TTS WebSocket Demo",
+                    version: "1.0",
+                    userAgent: navigator.userAgent
+                }));
+                console.log('已发送初始化消息');
+            } catch (e) {
+                console.error('发送初始化消息失败:', e);
+            }
+        }
+        
+        // 处理音频响应
+        function handleAudioResponse(data) {
+            log('收到音频数据，准备处理...');
+            
+            // 立即发送保活消息
+            sendKeepAlive();
+            
+            // 异步处理音频数据以避免阻塞UI线程
+            setTimeout(() => {
+                try {
+                    decodeAndPlayAudio(data.audio, data.format || 'wav');
+                } catch (e) {
+                    log(`处理音频数据出错: ${e.message}`);
+                    console.error('音频处理错误:', e);
+                    enableControls();
+                }
+            }, 0);
+        }
+        
+        // 处理状态消息
+        function handleStatusMessage(data) {
+            if (data.status === 'processing') {
+                log('服务器正在处理TTS请求...');
+                startProgressIndicator();
+            } 
+            else if (data.status === 'ready') {
+                log('服务器已准备好数据，等待传输...');
+            }
+            else if (data.status === 'success' || data.status === 'complete') {
+                log('TTS处理完成');
+                stopProgressIndicator();
+                enableControls();
+            }
+            else if (data.status === 'error') {
+                log(`处理出错: ${data.message || data.error || '未知错误'}`);
+                stopProgressIndicator();
+                enableControls();
+            }
+            else if (data.status === 'closing') {
+                log('服务器将关闭连接: ' + (data.message || ''));
+            }
+        }
+        
+        // 更新UI为已连接状态
+        function updateUIForConnected() {
+            connectionStatus.textContent = '已连接';
+            connectionStatus.className = 'status connected';
+            connectBtn.disabled = true;
+            disconnectBtn.disabled = false;
+            convertBtn.disabled = false;
+        }
+        
+        // 更新UI为断开状态
+        function updateUIForDisconnected() {
+            connectionStatus.textContent = '未连接';
+            connectionStatus.className = 'status disconnected';
+            connectBtn.disabled = false;
+            disconnectBtn.disabled = true;
+            convertBtn.disabled = true;
+        }
+        
+        // 改进的心跳机制
+        let heartbeatInterval = null;
+        let heartbeatTimeout = null;
+        
+        function startPingInterval() {
+            stopHeartbeat(); // 先清理现有的心跳
+            
+            // 每20秒发送一次心跳
+            heartbeatInterval = setInterval(() => {
+                sendPing();
+            }, 20000);
+            
+            // 初始发送一次心跳
+            sendPing();
+        }
+        
+        function sendPing() {
+            if (!socket || socket.readyState !== WebSocket.OPEN) {
+                stopHeartbeat();
+                return;
+            }
+            
+            try {
+                socket.send(JSON.stringify({ ping: true, timestamp: Date.now() }));
+                console.log('发送心跳');
+                
+                // 设置超时检测，如果30秒内没有响应则认为连接可能已断开
+                if (heartbeatTimeout) clearTimeout(heartbeatTimeout);
+                heartbeatTimeout = setTimeout(() => {
+                    log('心跳超时，连接可能已断开');
+                    if (socket) {
+                        try {
+                            socket.close();
+                        } catch (e) {}
+                    }
+                }, 30000);
+            } catch (e) {
+                console.error('发送心跳失败:', e);
+                stopHeartbeat();
+            }
+        }
+        
+        function stopHeartbeat() {
+            if (heartbeatInterval) {
+                clearInterval(heartbeatInterval);
+                heartbeatInterval = null;
+            }
+            
+            if (heartbeatTimeout) {
+                clearTimeout(heartbeatTimeout);
+                heartbeatTimeout = null;
+            }
+        }
+        
+        function resetHeartbeatTimer() {
+            // 收到任何消息都重置心跳超时计时器
+            if (heartbeatTimeout) {
+                clearTimeout(heartbeatTimeout);
+                heartbeatTimeout = null;
+            }
+        }
+        
+        // 发送保活消息
+        function sendKeepAlive() {
+            if (!socket || socket.readyState !== WebSocket.OPEN) return;
+            
+            try {
+                socket.send(JSON.stringify({ keep_alive: true, timestamp: Date.now() }));
+                console.log('发送保活消息');
+            } catch (e) {
+                console.error('发送保活消息失败:', e);
+            }
+        }
+        
+        // 使用Web Worker处理音频数据以避免阻塞主线程
+        function decodeAndPlayAudio(audioData, format) {
+            try {
+                // 如果浏览器支持Web Worker，则使用它解码音频数据
+                if (window.Worker) {
+                    const workerCode = `
+                        self.onmessage = function(e) {
+                            const base64Data = e.data;
+                            try {
+                                // 解码base64
+                                const binaryString = atob(base64Data);
+                                const bytes = new Uint8Array(binaryString.length);
+                                for (let i = 0; i < binaryString.length; i++) {
+                                    bytes[i] = binaryString.charCodeAt(i);
+                                }
+                                // 返回解码后的数据
+                                self.postMessage(bytes.buffer, [bytes.buffer]);
+                            } catch(error) {
+                                self.postMessage({error: error.message});
+                            }
+                        };
+                    `;
+                    
+                    const blob = new Blob([workerCode], { type: 'application/javascript' });
+                    const workerUrl = URL.createObjectURL(blob);
+                    const worker = new Worker(workerUrl);
+                    
+                    worker.onmessage = function(e) {
+                        if (e.data.error) {
+                            log(`解码音频出错: ${e.data.error}`);
+                            enableControls();
+                            return;
+                        }
+                        
+                        // 创建音频blob
+                        const buffer = e.data;
+                        audioBlob = new Blob([buffer], { type: `audio/${format || 'wav'}` });
+                        const audioUrl = URL.createObjectURL(audioBlob);
+                        
+                        // 替换音频元素
+                        createNewAudioElement(audioUrl);
+                        
+                        // 清理worker
+                        worker.terminate();
+                        URL.revokeObjectURL(workerUrl);
+                    };
+                    
+                    // 开始解码
+                    worker.postMessage(audioData);
+                    
+                    // 发送额外的ping以确保连接保持活跃
+                    sendKeepAlive();
+                } else {
+                    // 回退到主线程解码
+                    const binaryString = atob(audioData);
+                    const bytes = new Uint8Array(binaryString.length);
+                    for (let i = 0; i < binaryString.length; i++) {
+                        bytes[i] = binaryString.charCodeAt(i);
+                    }
+                    
+                    audioBlob = new Blob([bytes.buffer], { type: `audio/${format || 'wav'}` });
+                    const audioUrl = URL.createObjectURL(audioBlob);
+                    createNewAudioElement(audioUrl);
+                }
+            } catch (e) {
+                log(`处理音频数据出错: ${e.message}`);
+                console.error(e);
+                enableControls();
+            }
+        }
+        
+        function createNewAudioElement(audioUrl) {
+            // 创建一个新的audio元素
+            const audioContainer = audioOutput.parentElement;
+            const newAudio = document.createElement('audio');
+            newAudio.controls = true;
+            newAudio.src = audioUrl;
+            
+            // 替换原有元素
+            audioContainer.replaceChild(newAudio, audioOutput);
+            audioOutput = newAudio;
+            
+            // 启用下载按钮
+            downloadBtn.disabled = false;
+            
+            // 设置音频事件处理
+            newAudio.onloadeddata = function() {
+                log('音频已加载完成，可以播放');
+                enableControls();
+                
+                try {
+                    newAudio.play()
+                        .then(() => log('音频开始播放'))
+                        .catch(e => log(`自动播放失败: ${e.message}`));
+                } catch (e) {
+                    log('无法自动播放，请手动点击播放按钮');
+                }
+            };
+            
+            newAudio.onerror = function() {
+                log('加载音频时出错');
+                enableControls();
+            };
+        }
+        
+        // 发送TTS请求
+        convertBtn.addEventListener('click', function() {
+            // 如果连接不是已打开状态，尝试重新连接
+            if (!socket || socket.readyState !== WebSocket.OPEN) {
+                log('连接未打开，尝试重新连接...');
+                connect();
+                
+                // 等待连接打开后发送请求
+                const waitForConnection = setInterval(() => {
+                    if (socket && socket.readyState === WebSocket.OPEN) {
+                        clearInterval(waitForConnection);
+                        sendTTSRequest();
+                    } else if (socket && socket.readyState === WebSocket.CLOSED) {
+                        clearInterval(waitForConnection);
+                        log('连接失败，无法发送请求');
+                        enableControls();
+                    }
+                }, 100);
+                
+                // 10秒后如果还未连接，终止等待
+                setTimeout(() => {
+                    clearInterval(waitForConnection);
+                    if (!socket || socket.readyState !== WebSocket.OPEN) {
+                        log('连接超时，请重试');
+                        enableControls();
+                    }
+                }, 10000);
+                
+                return;
+            }
+            
+            sendTTSRequest();
+        });
+        
+        // 实际发送TTS请求的函数
+        function sendTTSRequest() {
+            const text = textToSpeech.value.trim();
+            if (!text) {
+                log('错误: 文本不能为空');
+                return;
+            }
+            
+            // 禁用控件
+            disableControls();
+            
+            // 构建请求 - 使用新格式
+            const request = {
+                text: text,
+                config: {
+                    api_base: apiBase.value.trim()
+                }
+            };
+            
+            // 添加可选参数
+            if (character.value.trim()) {
+                request.character = character.value.trim();
+            }
+            
+            if (emotion.value.trim()) {
+                request.emotion = emotion.value.trim();
+            }
+            
+            // 发送请求
+            log('发送TTS请求...');
+            try {
+                // 发送保活消息
+                sendKeepAlive();
+                
+                // 发送请求
+                socket.send(JSON.stringify(request));
+            } catch (e) {
+                log(`发送请求失败: ${e.message}`);
+                enableControls();
+            }
+        }
+        
+        // 断开连接
+        disconnectBtn.addEventListener('click', function() {
+            if (!socket) return;
+            
+            // 停止心跳
+            stopHeartbeat();
+            
+            // 如果连接已打开，发送断开请求
+            if (socket.readyState === WebSocket.OPEN) {
+                try {
+                    // 发送断开通知
+                    log('发送断开连接请求...');
+                    socket.send(JSON.stringify({ disconnect: true }));
+                    
+                    // 3秒后强制关闭
+                    setTimeout(() => {
+                        if (socket && socket.readyState !== WebSocket.CLOSED) {
+                            socket.close();
+                        }
+                    }, 3000);
+                } catch (e) {
+                    console.error('发送断开请求失败:', e);
+                    if (socket) socket.close();
+                }
+            } else if (socket.readyState !== WebSocket.CLOSED) {
+                // 如果未完全关闭，则强制关闭
+                socket.close();
+            }
+        });
+        
+        function disableControls() {
+            convertBtn.disabled = true;
+            textToSpeech.disabled = true;
+            provider.disabled = true;
+            apiBase.disabled = true;
+            character.disabled = true;
+            emotion.disabled = true;
+        }
+        
+        function enableControls() {
+            convertBtn.disabled = false;
+            textToSpeech.disabled = false;
+            provider.disabled = false;
+            apiBase.disabled = false;
+            character.disabled = false;
+            emotion.disabled = false;
+            
+            // 停止正在运行的指示器
+            stopProgressIndicator();
+            
+            // 清除超时定时器
+            if (socket && socket._requestTimeoutId) {
+                clearTimeout(socket._requestTimeoutId);
+                socket._requestTimeoutId = null;
+            }
+            
+            // 恢复正常ping频率
+            resetKeepAlive();
+        }
+        
+        // 进度指示器
+        let progressInterval = null;
+        
+        function startProgressIndicator() {
+            if (progressInterval) return;
+            
+            let dots = 0;
+            const progressElement = document.createElement('div');
+            progressElement.id = 'progressIndicator';
+            progressElement.style.marginTop = '10px';
+            progressElement.style.color = '#666';
+            document.querySelector('.log').appendChild(progressElement);
+            
+            progressInterval = setInterval(() => {
+                dots = (dots + 1) % 4;
+                const dotString = '.'.repeat(dots);
+                progressElement.textContent = `正在处理请求${dotString}`;
+            }, 500);
+        }
+        
+        function stopProgressIndicator() {
+            if (progressInterval) {
+                clearInterval(progressInterval);
+                progressInterval = null;
+                const indicator = document.getElementById('progressIndicator');
+                if (indicator) indicator.remove();
+            }
+        }
+        
+        // 下载按钮处理
+        downloadBtn.addEventListener('click', () => {
+            if (!audioBlob) {
+                log('错误: 没有可下载的音频');
+                return;
+            }
+            
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(audioBlob);
+            a.download = `tts_audio_${new Date().getTime()}.wav`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        });
+        
+        // 发送初始化消息并等待确认
+        function sendInitMessage() {
+            if (!socket || socket.readyState !== WebSocket.OPEN) return;
+            
+            try {
+                // 设置初始化超时定时器
+                const initTimeout = setTimeout(() => {
+                    log('初始化超时，服务器未响应');
+                    if (socket && socket.readyState === WebSocket.OPEN) {
+                        // 不要关闭连接，只记录日志
+                        log('继续保持连接，但初始化可能不完整');
+                    }
+                }, 5000);
+                
+                // 设置初始化消息的处理器
+                const initHandler = function(event) {
+                    try {
+                        const data = JSON.parse(event.data);
+                        
+                        if (data.status === 'initialized') {
+                            // 初始化成功
+                            clearTimeout(initTimeout);
+                            log('初始化成功: ' + data.message);
+                            
+                            // 移除临时事件处理器
+                            socket.removeEventListener('message', initHandler);
+                        }
+                    } catch (e) {
+                        console.error('处理初始化响应错误:', e);
+                    }
+                };
+                
+                // 添加临时消息处理器
+                socket.addEventListener('message', initHandler);
+                
+                // 发送初始化消息
+                socket.send(JSON.stringify({
+                    init: true,
+                    client: "TTS WebSocket Demo",
+                    version: "1.0",
+                    userAgent: navigator.userAgent
+                }));
+                log('发送初始化消息');
+            } catch (e) {
+                log('发送初始化消息失败: ' + e.message);
+                console.error('发送初始化消息失败:', e);
+            }
+        }
+        
+        // 修改连接逻辑，更可靠地处理重用连接
+        function connect() {
+            const url = serverUrlInput.value.trim();
+            if (!url) {
+                log('错误: 服务器地址不能为空');
+                return;
+            }
+            
+            // 避免重复连接 - 增强重用检测
+            if (socket) {
+                if (socket.readyState === WebSocket.CONNECTING) {
+                    log('正在连接中，请稍候...');
+                    return;
+                }
+                else if (socket.readyState === WebSocket.OPEN && lastConnectedUrl === url) {
+                    log('已有活跃连接，无需重新连接');
+                    updateUIForConnected();
+                    return;
+                }
+                else if (socket.readyState !== WebSocket.CLOSED) {
+                    // 如果连接不是我们想要的，关闭它
+                    try {
+                        log('关闭旧连接...');
+                        socket.close(1000, '用户请求新连接');
+                    } catch (e) {
+                        console.error('关闭旧连接时出错:', e);
+                    }
+                    // 给关闭一些时间
+                    setTimeout(() => createNewConnection(url), 500);
+                    return;
+                }
+            }
+            
+            // 直接创建新连接
+            createNewConnection(url);
+        }
+        
+        // 分离创建新连接的逻辑
+        function createNewConnection(url) {
+            try {
+                log('正在连接到WebSocket服务器...');
+                connectBtn.disabled = true; // 防止重复点击
+                
+                // 创建新连接
+                socket = new WebSocket(url);
+                lastConnectedUrl = url;
+                
+                // 连接状态变量 - 添加重试计数器
+                socket.connectRetries = 0;
+                socket.initSuccess = false;
+                
+                // 增加连接超时处理
+                const connectionTimeout = setTimeout(() => {
+                    if (socket && socket.readyState !== WebSocket.OPEN) {
+                        log('连接超时');
+                        connectBtn.disabled = false;
+                        if (socket) {
+                            try {
+                                socket.close();
+                            } catch (e) {}
+                        }
+                    }
+                }, 8000);
+                
+                socket.onopen = function() {
+                    clearTimeout(connectionTimeout);
+                    log('WebSocket连接已打开');
+                    updateUIForConnected();
+                    
+                    // 发送初始化消息，包含客户端信息，并等待确认
+                    sendInitMessage();
+                    
+                    // 添加保活机制
+                    startPingInterval();
+                };
+                
+                // 改进消息处理 - 避免初始化错误导致的断开
+                socket.onmessage = function(event) {
+                    // 重置心跳计时器，收到任何消息都表示连接活跃
+                    resetHeartbeatTimer();
+                    
+                    try {
+                        const data = JSON.parse(event.data);
+                        
+                        // 处理初始化成功
+                        if (data.status === 'initialized') {
+                            socket.initSuccess = true;
+                        }
+                        
+                        // 静默处理ping/pong等消息
+                        if (isPingPongMessage(data)) {
+                            console.log(`收到心跳消息: ${JSON.stringify(data)}`);
+                            return;
+                        }
+                        
+                        // 记录收到的其他消息
+                        log(`收到消息: ${data.status || data.type || '未知类型'}`);
+                        
+                        // 处理音频响应
+                        if (data.audio) {
+                            handleAudioResponse(data);
+                        }
+                        
+                        // 处理状态消息
+                        if (data.status) {
+                            handleStatusMessage(data);
+                        }
+                        
+                        // 处理错误消息
+                        if (data.error) {
+                            log(`错误: ${data.error}`);
+                            enableControls();
+                        }
+                    } catch (e) {
+                        log(`处理消息时出错: ${e.message}`);
+                        console.error('消息处理错误:', e);
+                    }
+                };
+                
+                // 改进连接关闭处理 - 避免不必要的重连
+                socket.onclose = function(event) {
+                    stopHeartbeat();
+                    
+                    // 记录关闭原因
+                    let message = `WebSocket连接已关闭`;
+                    if (event.code) {
+                        message += ` (代码: ${event.code})`;
+                    }
+                    if (event.reason) {
+                        message += ` 原因: ${event.reason}`;
+                    }
+                    log(message);
+                    
+                    // 重置UI状态
+                    updateUIForDisconnected();
+                    
+                    // 不再自动重连，让用户决定何时重新连接
+                };
+                
+                // 发生错误时的处理 - 更详细的错误日志
+                socket.onerror = function(error) {
+                    log('WebSocket发生错误');
+                    console.error('WebSocket错误:', error);
+                    connectBtn.disabled = false;
+                };
+                
+            } catch (error) {
+                log(`创建WebSocket连接时出错: ${error.message}`);
+                console.error('连接错误:', error);
+                connectBtn.disabled = false;
+            }
+        }
+        
+        // 发送TTS请求前先确保初始化成功
+        function sendTTSRequest() {
+            const text = textToSpeech.value.trim();
+            if (!text) {
+                log('错误: 文本不能为空');
+                enableControls();
+                return;
+            }
+            
+            // 检查初始化状态
+            if (!socket.initSuccess) {
+                log('警告: 连接未完全初始化，重新发送初始化...');
+                // 重新初始化
+                sendInitMessage();
+                
+                // 设置延迟后再发送请求
+                setTimeout(() => {
+                    if (socket && socket.readyState === WebSocket.OPEN) {
+                        sendActualTTSRequest(text);
+                    } else {
+                        log('错误: 连接已断开，无法发送请求');
+                        enableControls();
+                    }
+                }, 1000);
+                return;
+            }
+            
+            // 直接发送请求
+            sendActualTTSRequest(text);
+        }
+        
+        // 实际发送TTS请求的函数
+        function sendActualTTSRequest(text) {
+            // 禁用控件
+            disableControls();
+            
+            // 构建请求 - 使用新格式
+            const request = {
+                text: text,
+                config: {
+                    api_base: apiBase.value.trim()
+                }
+            };
+            
+            // 添加可选参数
+            if (character.value.trim()) {
+                request.character = character.value.trim();
+            }
+            
+            if (emotion.value.trim()) {
+                request.emotion = emotion.value.trim();
+            }
+            
+            // 发送请求
+            log('发送TTS请求...');
+            try {
+                // 发送保活消息
+                sendKeepAlive();
+                
+                // 发送请求
+                socket.send(JSON.stringify(request));
+            } catch (e) {
+                log(`发送请求失败: ${e.message}`);
+                enableControls();
+            }
+        }
+    </script>
+</body>
+</html>
