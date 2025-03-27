@@ -1,6 +1,6 @@
 """
 ws_utils.py
-存放WebSocket相关的工具函数，如消息发送、处理等
+存放WebSocket相关的工具函数，专注于支持语音助手功能
 """
 
 import json
@@ -95,212 +95,7 @@ async def send_message(websocket, message: Dict[str, Any]):
         logger.error(f"发送消息异常: {e}\n{error_trace}")
         return False
 
-async def process_message(client_id: str, websocket, data_text: str, 
-                         client_sessions: Dict[str, SessionData]):
-    """处理客户端消息
-    
-    Args:
-        client_id: 客户端ID
-        websocket: WebSocket连接
-        data_text: 接收到的消息文本
-        client_sessions: 客户端会话字典
-    """
-    try:
-        data = json.loads(data_text)
-        command = data.get("command")
-        
-        if not command:
-            await send_message(websocket, {
-                "type": "error",
-                "message": "缺少command字段"
-            })
-            return
-        
-        # 命令处理映射
-        command_handlers = {
-            "start_recording": handle_start_recording,
-            "stop_recording": handle_stop_recording,
-            "get_voiceprints": handle_get_voiceprints,
-            "check_status": handle_check_status
-        }
-        
-        # 执行对应的处理函数
-        if command in command_handlers:
-            await command_handlers[command](client_id, websocket, data, client_sessions)
-        else:
-            await send_message(websocket, {
-                "type": "error",
-                "message": f"未知命令: {command}"
-            })
-    
-    except json.JSONDecodeError:
-        await send_message(websocket, {
-            "type": "error",
-            "message": "无效的JSON格式"
-        })
-    except Exception as e:
-        logger.error(f"处理消息异常: {e}")
-        await send_message(websocket, {
-            "type": "error",
-            "message": f"处理消息异常: {str(e)}"
-        })
-
-async def handle_start_recording(client_id: str, websocket, data: Dict[str, Any], 
-                                client_sessions: Dict[str, SessionData]):
-    """处理开始录音命令"""
-    session = client_sessions[client_id]
-    
-    if session["recording_active"]:
-        await send_message(websocket, {
-            "type": "error",
-            "message": "录音已在进行中"
-        })
-        return
-    
-    # 获取参数
-    duration = int(data.get("duration", 5))
-    check_voiceprint = data.get("check_voiceprint", True)
-    batch_mode = data.get("batch_mode", False)
-    server_url = data.get("server_url", "ws://127.0.0.1:8765")
-    
-    logger.info(f"客户端 {client_id} 开始录音: 时长={duration}秒, 声纹识别={check_voiceprint}, 批量模式={batch_mode}, 服务器={server_url}")
-    
-    try:
-        # 创建ASR客户端并连接
-        asr_client = await create_and_connect_asr_client(client_id, server_url, session)
-        if not asr_client:
-            return
-            
-        # 创建消息发送器函数，用于传递给AudioService
-        async def message_sender(message):
-            await send_message(websocket, message)
-        
-        # 启动异步录音任务
-        import asyncio
-        if batch_mode:
-            # 批量模式：录音完成后再识别
-            logger.debug(f"客户端 {client_id} 启动批量录音任务")
-            asyncio.create_task(AudioService.perform_batch_recording(
-                session, message_sender, duration, check_voiceprint))
-        else:
-            # 流式模式：边录边识别
-            logger.debug(f"客户端 {client_id} 启动流式录音任务")
-            asyncio.create_task(AudioService.perform_recording(
-                session, message_sender, duration, check_voiceprint))
-            
-    except Exception as e:
-        error_trace = traceback.format_exc()
-        logger.error(f"客户端 {client_id} 启动录音异常: {e}\n{error_trace}")
-        await cleanup_asr_client(session)
-        await send_message(websocket, {
-            "type": "error",
-            "message": f"启动录音异常: {str(e)}"
-        })
-
-async def create_and_connect_asr_client(client_id: str, server_url: str, session: SessionData) -> Optional[AudioWebSocketClient]:
-    """创建并连接ASR客户端"""
-    logger.debug(f"为客户端 {client_id} 创建ASR客户端, 连接到 {server_url}")
-    asr_client = AudioWebSocketClient(server_url)
-    session["asr_client"] = asr_client
-    
-    # 连接到语音服务器
-    logger.debug(f"客户端 {client_id} 正在尝试连接到语音服务器")
-    if await asr_client.connect():
-        logger.info(f"客户端 {client_id} 成功连接到语音服务器")
-        session["recording_active"] = True
-        session["recognition_results"] = []
-        session["final_result"] = None
-        return asr_client
-    else:
-        logger.error(f"客户端 {client_id} 无法连接到语音服务器")
-        await cleanup_asr_client(session)
-        return None
-
-async def cleanup_asr_client(session: SessionData):
-    """清理ASR客户端资源"""
-    if session.get("asr_client"):
-        await session["asr_client"].close()
-        session["asr_client"] = None
-
-async def handle_stop_recording(client_id: str, websocket, data: Dict[str, Any], 
-                               client_sessions: Dict[str, SessionData]):
-    """处理停止录音命令"""
-    session = client_sessions[client_id]
-    
-    if not session["recording_active"]:
-        await send_message(websocket, {
-            "type": "error",
-            "message": "当前没有进行中的录音"
-        })
-        return
-    
-    # 标记停止录音
-    session["recording_active"] = False
-    
-    # 发送停止消息
-    await send_message(websocket, {
-        "type": "recording",
-        "status": "stopped"
-    })
-
-async def handle_get_voiceprints(client_id: str, websocket, data: Dict[str, Any] = None, 
-                                client_sessions: Dict[str, SessionData] = None):
-    """处理获取声纹列表命令"""
-    # 使用AudioService获取声纹列表
-    response = await AudioService.get_voiceprints()
-    
-    if response.get("success"):
-        await send_message(websocket, {
-            "type": "voiceprints",
-            "data": response.get("voiceprints", [])
-        })
-    else:
-        await send_message(websocket, {
-            "type": "error",
-            "message": response.get("message", "获取声纹列表失败")
-        })
-
-async def handle_check_status(client_id: str, websocket, data: Dict[str, Any], 
-                             client_sessions: Dict[str, SessionData]):
-    """处理检查状态命令"""
-    session = client_sessions[client_id]
-    
-    status = {
-        "client_id": client_id,
-        "recording_active": session["recording_active"],
-        "has_results": len(session.get("recognition_results", [])) > 0,
-        "has_final_result": session.get("final_result") is not None
-    }
-    
-    # 如果有最终结果，一并发回前端
-    if session.get("final_result"):
-        await send_message(websocket, {
-            "type": "recording",
-            "status": "completed",
-            "result": session["final_result"]
-        })
-    else:
-        await send_message(websocket, {
-            "type": "status",
-            "data": status
-        })
-
-async def cleanup_client(client_id: str, client_sessions: Dict[str, SessionData], 
-                        active_connections: Dict[str, Any]):
-    """清理客户端资源"""
-    if client_id in active_connections:
-        del active_connections[client_id]
-        
-    if client_id in client_sessions:
-        session = client_sessions[client_id]
-        await cleanup_asr_client(session)
-        del client_sessions[client_id]
-        logger.info(f"已清理客户端 {client_id} 的资源")
-
-# ============================
-# 语音聊天部分
-# ============================
-
+# 语音聊天处理函数 - 这是/voice-assistant接口需要的核心功能
 async def process_voice_chat_message(client_id: str, websocket, data_text: str, 
                                     client_sessions: Dict[str, SessionData]):
     """处理语音聊天客户端消息"""
@@ -415,6 +210,31 @@ async def handle_start_voice_chat(client_id: str, websocket, data: Dict[str, Any
             "message": f"启动录音异常: {str(e)}"
         })
 
+async def create_and_connect_asr_client(client_id: str, server_url: str, session: SessionData) -> Optional[AudioWebSocketClient]:
+    """创建并连接ASR客户端"""
+    logger.debug(f"为客户端 {client_id} 创建ASR客户端, 连接到 {server_url}")
+    asr_client = AudioWebSocketClient(server_url)
+    session["asr_client"] = asr_client
+    
+    # 连接到语音服务器
+    logger.debug(f"客户端 {client_id} 正在尝试连接到语音服务器")
+    if await asr_client.connect():
+        logger.info(f"客户端 {client_id} 成功连接到语音服务器")
+        session["recording_active"] = True
+        session["recognition_results"] = []
+        session["final_result"] = None
+        return asr_client
+    else:
+        logger.error(f"客户端 {client_id} 无法连接到语音服务器")
+        await cleanup_asr_client(session)
+        return None
+
+async def cleanup_asr_client(session: SessionData):
+    """清理ASR客户端资源"""
+    if session.get("asr_client"):
+        await session["asr_client"].close()
+        session["asr_client"] = None
+
 def extract_voice_chat_parameters(data: Dict[str, Any]) -> Dict[str, Any]:
     """提取语音聊天参数"""
     return {
@@ -499,6 +319,27 @@ async def create_voice_chat_tasks(client_id: str, websocket, session: SessionDat
     
     return message_sender, recording_task
 
+async def handle_stop_recording(client_id: str, websocket, data: Dict[str, Any], 
+                               client_sessions: Dict[str, SessionData]):
+    """处理停止录音命令"""
+    session = client_sessions[client_id]
+    
+    if not session.get("recording_active"):
+        await send_message(websocket, {
+            "type": "error",
+            "message": "当前没有进行中的录音"
+        })
+        return
+    
+    # 标记停止录音
+    session["recording_active"] = False
+    
+    # 发送停止消息
+    await send_message(websocket, {
+        "type": "recording",
+        "status": "stopped"
+    })
+
 async def handle_set_params(client_id: str, websocket, data: Dict[str, Any], 
                            client_sessions: Dict[str, SessionData]):
     """设置语音聊天参数"""
@@ -526,7 +367,7 @@ async def handle_set_params(client_id: str, websocket, data: Dict[str, Any],
 
 async def handle_send_audio(client_id: str, websocket, data: Dict[str, Any], 
                            client_sessions: Dict[str, SessionData]):
-    """处理客户端发送的音频数据（预留接口）"""
+    """处理客户端发送的音频数据"""
     await send_message(websocket, {
         "type": "error",
         "message": "直接发送音频数据功能尚未实现"
