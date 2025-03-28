@@ -12,11 +12,24 @@ import time
 import asyncio
 import os
 from inspect import currentframe, getframeinfo
+from collections import deque
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI
 
 from app import logger
 from app.core.ws.ws_utils import send_message, process_voice_chat_message
 
 api_ws = APIRouter()
+
+# 在api_ws路由之前添加CORS配置
+app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 允许所有源，生产环境中应该限制具体域名
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # 语音助手连接和会话存储
 voice_assistant_connections: Dict[str, WebSocket] = {}
@@ -28,22 +41,25 @@ async def voice_assistant_endpoint(websocket: WebSocket):
     client_id = str(uuid.uuid4())
     
     try:
+        # 删除多余的accept调用，只保留一次
+        await websocket.accept()
+        
         # 禁用自动关闭连接
         websocket.auto_close = False
         
-        # 接受WebSocket连接
-        await websocket.accept()
         logger.info(f"语音助手WebSocket连接成功接受: {client_id}")
         voice_assistant_connections[client_id] = websocket
         
         # 初始化语音助手会话
         voice_assistant_sessions[client_id] = create_voice_assistant_session(client_id)
         
-        # 发送连接成功消息
+        # 发送连接成功消息，增加延迟确保消息发送成功
+        await asyncio.sleep(0.1)
         await send_message(websocket, {
             "type": "connection",
             "client_id": client_id,
-            "message": "语音助手连接成功"
+            "message": "语音助手连接成功",
+            "timestamp": time.time()
         })
         
         # 记录上次接收消息的时间
@@ -57,9 +73,17 @@ async def voice_assistant_endpoint(websocket: WebSocket):
                 conn_state = getattr(websocket, "client_state", None)
                 logger.debug(f"[DIAG] 准备接收消息，客户端状态: {conn_state}, 连接ID: {client_id}")
                 
-                # 设置receive操作的超时时间
-                data = await websocket.receive_text()
-                
+                # 使用带超时的receive_text
+                try:
+                    data = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    # 发送保活消息
+                    if await send_message(websocket, {"type": "ping", "timestamp": time.time()}):
+                        continue
+                    else:
+                        logger.warning(f"保活消息发送失败，客户端 {client_id} 可能已断开")
+                        break
+
                 # 更新活动时间
                 last_activity = time.time()
                 
@@ -134,6 +158,11 @@ async def process_voice_assistant_message(client_id: str, websocket: WebSocket, 
         command = message.get("command", "")
         message_type = message.get("type", "")  # 兼容旧格式
         
+        # 初始化TTS队列
+        if not session.get("tts_queue"):
+            session["tts_queue"] = deque()
+            session["tts_task"] = None
+
         # 处理心跳消息
         if message.get("ping") is True or message.get("keep_alive") is True:
             # 记录保活消息
@@ -324,35 +353,40 @@ async def process_voice_assistant_message(client_id: str, websocket: WebSocket, 
             
         # 处理流式输出LLM完成
         elif command == "llm_stream_end" or message_type == "llm_stream_end":
-            # 从消息中获取文本，如果消息中有提供
-            text = message.get("text", "")
+            # 获取完整文本
+            text = message.get("text", "") or "".join(session.get("llm_response_buffer", []))
             
-            # 如果消息中没有文本，尝试从会话缓冲区获取
-            if not text and session.get("llm_response_buffer"):
-                text = "".join(session["llm_response_buffer"])
-            
-            # 如果仍然没有文本，报错
             if not text:
-                logger.warning("LLM流式响应完成，但无法获取响应文本")
                 await send_message(websocket, {
                     "type": "error",
                     "message": "未收集到LLM响应文本"
                 })
                 return
                 
-            # 有文本，发送给TTS处理
+            # 只记录完成消息，不进行额外的TTS处理
             logger.info(f"LLM流式响应完成，总字符数: {len(text)}")
             
-            # 处理前检查连接状态
-            conn_state = getattr(websocket, "client_state", "unknown")
-            logger.debug(f"[DIAG] TTS处理前连接状态: {conn_state}, 客户端ID: {client_id}")
-            
-            # 处理TTS并发送结果，不需要发送后续的确认消息
-            await send_to_tts(client_id, websocket, text, session)
-            
-            # 处理后检查连接状态
-            conn_state = getattr(websocket, "client_state", "unknown")
-            logger.debug(f"[DIAG] TTS处理后连接状态: {conn_state}, 客户端ID: {client_id}")
+            # 仅发送完成通知
+            await send_message(websocket, {
+                "type": "llm_stream_complete",
+                "text": text,
+                "history_id": message.get("history_id"),
+                "message_id": message.get("message_id")
+            })
+            return
+
+        # 处理完整句子
+        elif command == "llm_sentence_complete" or message_type == "llm_sentence_complete":
+            text = message.get("text", "")
+            if text:
+                # 将句子加入TTS处理队列
+                session["tts_queue"].append(text)
+                
+                # 如果没有正在运行的TTS任务，启动一个
+                if not session.get("tts_task") or session["tts_task"].done():
+                    session["tts_task"] = asyncio.create_task(
+                        process_tts_queue(client_id, websocket, session)
+                    )
             return
             
         else:
@@ -387,7 +421,9 @@ async def process_voice_assistant_message(client_id: str, websocket: WebSocket, 
 async def send_to_tts(client_id: str, websocket: WebSocket, text: str, session: Dict[str, Any]):
     """将文本发送给TTS服务并将音频返回给客户端"""
     try:
-        logger.info(f"发送文本到TTS服务: {text[:50]}...")
+        # 文本去重处理
+        text = remove_duplicate_text(text)
+        logger.info(f"发送文本到TTS服务(去重后): {text[:50]}...")
         
         # 设置会话标志，表明我们正在处理TTS
         session["tts_processing"] = True
@@ -485,6 +521,62 @@ async def send_to_tts(client_id: str, websocket: WebSocket, text: str, session: 
         await send_message(websocket, {
             "type": "error",
             "message": f"TTS处理失败: {str(e)}"
+        })
+
+def remove_duplicate_text(text: str) -> str:
+    """去除重复的文本片段"""
+    # 分句
+    sentences = text.split('。')
+    # 过滤空句
+    sentences = [s.strip() + '。' for s in sentences if s.strip()]
+    # 去重
+    unique_sentences = []
+    for sentence in sentences:
+        if sentence not in unique_sentences:
+            unique_sentences.append(sentence)
+    # 合并
+    return ''.join(unique_sentences)
+
+async def process_tts_queue(client_id: str, websocket: WebSocket, session: Dict[str, Any]):
+    """处理TTS队列中的句子"""
+    queue = session["tts_queue"]
+    processed_texts = set()  # 用于跟踪已处理的文本
+    
+    try:
+        while queue:
+            # 获取下一个要处理的句子
+            text = queue.popleft()
+            
+            # 检查是否已处理过相同的文本
+            if text in processed_texts:
+                logger.debug(f"跳过重复文本: {text[:30]}...")
+                continue
+                
+            # 添加到已处理集合
+            processed_texts.add(text)
+            
+            # 处理TTS
+            audio_path = await process_gsvi_tts(text, session)
+            
+            if audio_path:
+                # 发送音频URL给客户端
+                audio_url = f"/static/audio/{os.path.basename(audio_path)}"
+                
+                await send_message(websocket, {
+                    "type": "tts_sentence_complete",
+                    "audio_url": audio_url,
+                    "text": text,
+                    "timestamp": time.time()
+                })
+            
+            # 短暂等待，避免TTS请求过于频繁
+            await asyncio.sleep(0.1)
+            
+    except Exception as e:
+        logger.error(f"处理TTS队列异常: {e}")
+        await send_message(websocket, {
+            "type": "error",
+            "message": f"TTS处理异常: {str(e)}"
         })
 
 async def process_gsvi_tts(text: str, session: Dict[str, Any]):

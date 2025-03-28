@@ -8,6 +8,8 @@ import traceback
 from typing import Dict, Any, Callable, Awaitable, Optional
 import time
 import asyncio
+import os
+import uuid
 
 from app import logger
 from app.core.ws.audio_service import AudioService
@@ -15,6 +17,7 @@ from app.core.ws.audio_websocket_client import AudioWebSocketClient
 from app.core.pipeline.chat_process import chat_process
 from app.core.llm.message import LLMMessage, MessageRole
 from app.core.pipeline.text_process import text_process
+from app.core.tts.gsvi_tts_service import GSVITTSService  # 添加这行导入
 from inspect import currentframe, getframeinfo
 from starlette.websockets import WebSocketState, WebSocketDisconnect
 
@@ -470,24 +473,24 @@ async def handle_stream_response(client_id: str, websocket, model, text, history
     """处理流式LLM响应"""
     logger.info(f"开始流式LLM请求: model={model}, history_id={history_id}, message='{text}'")
     try:
-        # 发送开始流式响应的消息
+        # 重置或初始化状态
+        setattr(websocket, "_text_buffer", "")
+        
         await send_message(websocket, {
             "type": "llm_stream_start",
             "history_id": history_id
         })
         
-        # 记录流式响应的完整文本
         full_text = ""
         message_id = None
         
-        # 创建输入消息
+        # 处理LLM流式响应
         input_message = LLMMessage.from_text(
             text=text,
             history_id=history_id or "",
             role=MessageRole.USER
         )
         
-        # 创建生成器
         generator = text_process.process_message_stream(
             model=model,
             message=input_message,
@@ -495,22 +498,53 @@ async def handle_stream_response(client_id: str, websocket, model, text, history
             user_id=user_id
         )
         
-        # 处理流式响应
+        # 接收流式响应并缓存
         async for chunk in generator:
             await process_stream_chunk(
                 chunk, websocket, history_id, full_text, message_id
             )
-            # 更新完整文本引用
             if isinstance(chunk, str) and not chunk.startswith("__TOKEN_INFO__"):
                 full_text += chunk
         
-        # 发送流式响应结束消息
-        logger.info(f"流式响应完成，共 {len(full_text)} 字符")
+        # LLM响应完成后，进行句子切分
+        complete_text = getattr(websocket, "_text_buffer", "").strip()
+        if complete_text:
+            # 切分成句子
+            sentences = split_text_to_sentences(complete_text)
+            logger.info(f"完整响应文本: '{complete_text}' 切分为 {len(sentences)} 个句子")
+            
+            # 逐句发送处理
+            for i, sentence in enumerate(sentences, 1):
+                if sentence.strip():
+                    logger.debug(f"处理第{i}个句子: '{sentence}'")
+                    
+                    # 为每个句子生成一个音频
+                    audio_path = await process_gsvi_tts(sentence, session)
+                    
+                    if audio_path:
+                        # 构建音频URL
+                        audio_url = f"/static/audio/{os.path.basename(audio_path)}"
+                        
+                        # 发送单个句子的TTS结果
+                        await send_message(websocket, {
+                            "type": "tts_sentence_complete",
+                            "text": sentence,
+                            "audio_url": audio_url,
+                            "history_id": history_id,
+                            "index": i,
+                            "total": len(sentences),
+                            "timestamp": time.time()
+                        })
+        
+        # 清理会话状态
+        delattr(websocket, "_text_buffer")
+        
+        # 仅发送完整文本用于显示,不包含任何音频URL
         await send_message(websocket, {
             "type": "llm_stream_end",
             "text": full_text,
-            "message_id": message_id,
-            "history_id": history_id
+            "history_id": history_id,
+            "message_id": message_id
         })
         
     except Exception as e:
@@ -521,42 +555,67 @@ async def handle_stream_response(client_id: str, websocket, model, text, history
             "message": f"流式处理异常: {str(e)}"
         })
 
+def split_text_to_sentences(text: str) -> list[str]:
+    """将文本切分成句子，保留标点符号"""
+    # 定义分句标点符号
+    punctuations = ['。', '，', '！', '？', '，', ',', '!', '?', '.']
+    
+    sentences = []
+    current = ""
+    
+    for char in text:
+        current += char
+        if char in punctuations:
+            if current.strip():
+                sentences.append(current.strip())
+            current = ""
+            
+    # 处理最后可能没有标点的部分
+    if current.strip():
+        sentences.append(current.strip())
+        
+    return sentences
+
 async def process_stream_chunk(chunk, websocket, history_id, full_text, message_id):
     """处理流式响应的单个数据块"""
-    # 处理文本块
     if isinstance(chunk, str):
-        # 检查是否是token信息特殊标记
+        # 检查是否是token信息
         if chunk.startswith("__TOKEN_INFO__"):
             try:
-                token_data = json.loads(chunk[14:])  # 去掉特殊前缀
+                token_data = json.loads(chunk[14:])
                 message_id = token_data.get("message_id")
             except Exception as e:
                 logger.error(f"解析token信息失败: {e}")
-        else:
-            # 是普通文本块
-            # 发送流式文本片段到客户端
+            return
+
+        # 获取或初始化文本缓冲区
+        if not hasattr(websocket, "_text_buffer"):
+            setattr(websocket, "_text_buffer", "")
+        
+        buffer = getattr(websocket, "_text_buffer") + chunk
+        
+        # 更新文本缓冲区
+        setattr(websocket, "_text_buffer", buffer)
+        
+        # 发送内容到前端显示
+        await send_message(websocket, {
+            "type": "llm_stream_chunk",
+            "content": chunk,
+            "history_id": history_id
+        })
+
+    elif isinstance(chunk, dict):
+        if "text" in chunk:
+            content = chunk["text"]
             await send_message(websocket, {
                 "type": "llm_stream_chunk",
-                "content": chunk,
+                "content": content,
                 "history_id": history_id
             })
-    else:
-        # 处理其他类型的数据（如果有）
-        logger.debug(f"收到非字符串数据: {type(chunk)}")
-        
-        # 尝试提取可能的信息
-        if isinstance(chunk, dict):
-            if "text" in chunk:
-                content = chunk["text"]
-                await send_message(websocket, {
-                    "type": "llm_stream_chunk",
-                    "content": content,
-                    "history_id": history_id
-                })
-            elif "message_id" in chunk:
-                message_id = chunk["message_id"]
-            elif "token_info" in chunk and "message_id" in chunk["token_info"]:
-                message_id = chunk["token_info"]["message_id"]
+        elif "message_id" in chunk:
+            message_id = chunk["message_id"]
+        elif "token_info" in chunk and "message_id" in chunk["token_info"]:
+            message_id = chunk["token_info"]["message_id"]
 
 async def handle_normal_response(client_id: str, websocket, model, text, history_id, user_id, session):
     """处理普通LLM响应"""
@@ -593,3 +652,44 @@ async def handle_normal_response(client_id: str, websocket, model, text, history
             "type": "error",
             "message": f"LLM处理失败: {response.get('error', '未知错误')}"
         })
+
+async def process_gsvi_tts(text: str, session: Dict[str, Any]) -> Optional[str]:
+    """使用GSVI TTS服务生成语音
+
+    Args:
+        text: 要转换的文本
+        session: 包含TTS配置的会话数据
+
+    Returns:
+        str: 生成的音频文件路径，失败则返回None
+    """
+    try:
+        # 创建TTS服务实例
+        api_base = session.get("api_base", "http://127.0.0.1:5000")
+        tts_service = GSVITTSService(api_base=api_base)
+        
+        # 生成唯一的输出文件名
+        output_filename = f"gsvi_tts_assistant_{uuid.uuid4()}.mp3"
+        output_path = os.path.join("static/audio", output_filename)
+        
+        # 确保目录存在
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        
+        # 提取TTS参数
+        character = session.get("character", None)
+        emotion = session.get("emotion", None)
+        
+        # 进行TTS转换
+        await tts_service.synthesize(
+            text=text,
+            output_file=output_path,
+            character=character,
+            emotion=emotion
+        )
+        
+        logger.info(f"GSVI TTS生成完成: {output_path}")
+        return output_path
+        
+    except Exception as e:
+        logger.error(f"GSVI TTS处理异常: {str(e)}", exc_info=True)
+        return None

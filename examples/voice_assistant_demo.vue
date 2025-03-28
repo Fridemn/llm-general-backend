@@ -85,7 +85,18 @@
   
       <div class="card">
         <h2>音频输出</h2>
-        <audio id="audioPlayer" style="width:100%;" controls :src="audioUrl" @ended="onAudioEnded"></audio>
+        <div class="audio-queue">
+          <audio ref="audioPlayer"
+                 @ended="onAudioEnded"
+                 @error="onAudioError"
+                 @loadstart="onAudioLoadStart"
+                 @canplay="onAudioCanPlay"
+                 style="display: none;">
+          </audio>
+          <div v-if="currentAudio" class="playing-status">
+            正在播放: {{ currentAudio.text || '语音响应' }}
+          </div>
+        </div>
       </div>
   
       <div class="card">
@@ -130,10 +141,13 @@
       const connectionStatusText = ref('未连接');
       const conversationHistory = ref([{ sender: 'assistant', text: '您好，我是语音助手，请点击"连接服务器"开始对话。' }]);
       const logs = ref([]);
-      const audioUrl = ref('');
+      const audioQueue = ref([]);
+      const isPlaying = ref(false);
       const connectionStatusClass = ref('disconnected');
       const progressWidth = ref('0%');
       const progressText = ref('0%');
+      const audioPlayer = ref(null);
+      const currentAudio = ref(null);
   
       // Computed properties for button states
       const connectBtnDisabled = computed(() => isConnected.value);
@@ -157,26 +171,42 @@
           updateConnectionStatus('正在连接...', 'processing');
           addToLog(`尝试连接到: ${wsUrl}`);
   
-          if (socket.value && socket.value.readyState !== WebSocket.CLOSED) {
+          // 确保先关闭之前的连接
+          if (socket.value) {
             socket.value.close();
+            socket.value = null;
           }
   
           socket.value = new WebSocket(wsUrl);
+          
+          // 添加更详细的错误处理
+          socket.value.addEventListener('error', (event) => {
+              console.error('WebSocket Error:', event);
+              addToLog(`WebSocket详细错误信息: ${JSON.stringify(event)}`);
+          });
   
           socket.value.onopen = () => {
-            updateStatus('已连接到服务器');
-            updateConnectionStatus('已连接', 'connected');
-            isConnected.value = true;
-            addToLog('WebSocket连接已建立');
-  
-            fetchAvailableModels();
-            startHeartbeat();
+              console.log('WebSocket连接已打开');
+              addToLog('WebSocket连接已打开');
+              updateStatus('已连接到服务器');
+              updateConnectionStatus('已连接', 'connected');
+              isConnected.value = true;
+              fetchAvailableModels();
+              startHeartbeat();
           };
   
           socket.value.onclose = (event) => {
             const reason = event.reason ? event.reason : "未提供关闭原因";
             const code = event.code;
             addToLog(`WebSocket连接已关闭 - 代码: ${code}, 原因: ${reason}`);
+            
+            // 如果连接失败且未达到最大重试次数，则重试
+            if (!isConnected.value && retryCount < maxRetries) {
+              retryCount++;
+              addToLog(`尝试重新连接 (${retryCount}/${maxRetries})...`);
+              setTimeout(tryConnect, 1000); // 1秒后重试
+              return;
+            }
   
             updateConnectionStatus('未连接', 'disconnected');
             updateStatus('连接已关闭');
@@ -184,19 +214,24 @@
           };
   
           socket.value.onerror = (error) => {
+            console.error('WebSocket Error:', error);
+            addToLog(`WebSocket错误: ${error}`);
+            // 如果是连接阶段的错误，让 onclose 处理重试
+            if (!isConnected.value) {
+              return;
+            }
             updateStatus('连接错误');
             updateConnectionStatus('连接错误', 'disconnected');
-            addToLog(`WebSocket错误: ${error}`);
-            console.error('WebSocket Error:', error);
             resetConnectionState();
           };
   
           socket.value.onmessage = handleServerMessage;
+  
         } catch (error) {
+          console.error('连接错误:', error);
+          addToLog(`详细错误信息: ${error.toString()}`);
           updateStatus(`连接失败: ${error.message}`);
           updateConnectionStatus('连接失败', 'disconnected');
-          addToLog(`创建WebSocket连接失败: ${error.toString()}`);
-          console.error('Connection Error:', error);
         }
       };
   
@@ -378,7 +413,7 @@
       };
   
       // Handle server message
-      const handleServerMessage = (event) => {
+      const handleServerMessage = async (event) => {
         try {
           lastServerActivity.value = Date.now();
   
@@ -524,6 +559,19 @@
   
               return;
   
+            case 'tts_sentence_complete':
+              // 将新的音频添加到队列
+              audioQueue.value.push({
+                url: window.location.protocol + '//' + window.location.hostname + ':8000' + message.audio_url,
+                text: message.text
+              });
+              
+              // 如果没有正在播放，开始播放
+              if (!isPlaying.value) {
+                playNextAudio();
+              }
+              break;
+  
             case 'error':
               updateStatus(`错误: ${message.message}`);
               addToLog(`错误: ${message.message}`);
@@ -605,10 +653,29 @@
   
       // Play audio response
       const playAudioResponse = (url) => {
-        // 修改这里，使用 8000 端口
         const baseUrl = window.location.protocol + '//' + window.location.hostname + ':8000';
         const fullUrl = baseUrl + url;
-        audioUrl.value = fullUrl;
+        
+        // 检查队列中是否已存在相同URL的音频
+        if (audioQueue.value.some(audio => audio.url === fullUrl)) {
+            addToLog(`跳过重复音频: ${url}`);
+            return;
+        }
+        
+        // 添加调试日志
+        console.log('准备播放音频:', fullUrl);
+        addToLog(`添加音频到播放队列: ${url}`);
+        
+        // 添加到播放队列
+        audioQueue.value.push({
+            url: fullUrl,
+            text: '语音回复'
+        });
+        
+        // 如果没有正在播放，开始播放
+        if (!isPlaying.value) {
+            playNextAudio();
+        }
       };
   
       // Add log
@@ -659,8 +726,103 @@
   
       // Handle audio ended event
       const onAudioEnded = () => {
-        updateStatus('语音助手就绪');
-        sendHeartbeat();
+        addToLog('音频播放完成');
+        
+        // 移除已播放的音频
+        audioQueue.value.shift();
+        isPlaying.value = false;
+        currentAudio.value = null;
+        
+        // 发送播放完成消息
+        if (socket.value && socket.value.readyState === WebSocket.OPEN) {
+          socket.value.send(JSON.stringify({
+            command: "playback_complete",
+            timestamp: Date.now()
+          }));
+        }
+        
+        // 继续播放队列中的下一个
+        playNextAudio();
+      };
+  
+      // Handle audio error event
+      const onAudioError = (error) => {
+        console.error('音频播放错误:', error);
+        addToLog(`音频播放错误: ${error.message || '未知错误'}`);
+        
+        if (socket.value && socket.value.readyState === WebSocket.OPEN) {
+          socket.value.send(JSON.stringify({
+            command: "playback_error",
+            error: error.message || '未知错误',
+            timestamp: Date.now()
+          }));
+        }
+        
+        // 跳过错误的音频
+        isPlaying.value = false;
+        audioQueue.value.shift();
+        currentAudio.value = null;
+        
+        // 尝试播放下一个
+        playNextAudio();
+      };
+  
+      // Handle audio load start event
+      const onAudioLoadStart = () => {
+        if (socket.value && socket.value.readyState === WebSocket.OPEN) {
+          socket.value.send(JSON.stringify({
+            keep_alive: true,
+            playback_starting: true,
+            timestamp: Date.now()
+          }));
+        }
+      };
+  
+      // Handle audio can play event
+      const onAudioCanPlay = () => {
+        if (socket.value && socket.value.readyState === WebSocket.OPEN) {
+          socket.value.send(JSON.stringify({
+            keep_alive: true,
+            playback_loaded: true,
+            timestamp: Date.now()
+          }));
+        }
+      };
+  
+      // Play next audio in queue
+      const playNextAudio = () => {
+        if (audioQueue.value.length > 0 && !isPlaying.value) {
+            // 检查并移除重复音频
+            if (audioQueue.value.length > 1) {
+                const uniqueUrls = new Set();
+                audioQueue.value = audioQueue.value.filter(audio => {
+                    if (uniqueUrls.has(audio.url)) {
+                        return false;
+                    }
+                    uniqueUrls.add(audio.url);
+                    return true;
+                });
+            }
+            
+            currentAudio.value = audioQueue.value[0];
+            isPlaying.value = true;
+            
+            try {
+                if (audioPlayer.value) {
+                    audioPlayer.value.src = currentAudio.value.url;
+                    // 添加延迟确保音频加载完成
+                    setTimeout(() => {
+                        audioPlayer.value.play().catch(error => {
+                            console.error('播放音频失败:', error);
+                            onAudioError(error);
+                        });
+                    }, 100);
+                }
+            } catch (error) {
+                console.error('设置音频源失败:', error);
+                onAudioError(error);
+            }
+        }
       };
   
       // Handle history id change
@@ -707,7 +869,8 @@
         connectionStatusText,
         conversationHistory,
         logs,
-        audioUrl,
+        audioQueue,
+        isPlaying,
         connectionStatusClass,
         progressWidth,
         progressText,
@@ -735,7 +898,13 @@
         sendHeartbeat,
         stopHeartbeat,
         onAudioEnded,
-        onHistoryIdChange
+        onAudioError,
+        onAudioLoadStart,
+        onAudioCanPlay,
+        playNextAudio,
+        onHistoryIdChange,
+        audioPlayer,
+        currentAudio
       };
     }
   };
@@ -852,5 +1021,17 @@
     text-align: right;
   }
   
-  </style>
+  .audio-queue {
+    position: relative;
+    min-height: 50px;
+  }
   
+  .playing-status {
+    padding: 10px;
+    margin: 5px 0;
+    background-color: #E3F2FD;
+    border-radius: 4px;
+    text-align: center;
+  }
+  
+  </style>
