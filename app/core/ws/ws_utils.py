@@ -473,8 +473,9 @@ async def handle_stream_response(client_id: str, websocket, model, text, history
     """处理流式LLM响应"""
     logger.info(f"开始流式LLM请求: model={model}, history_id={history_id}, message='{text}'")
     try:
-        # 重置或初始化状态
+        # 重置状态
         setattr(websocket, "_text_buffer", "")
+        setattr(websocket, "_processed_sentences", set())
         
         await send_message(websocket, {
             "type": "llm_stream_start",
@@ -498,53 +499,38 @@ async def handle_stream_response(client_id: str, websocket, model, text, history
             user_id=user_id
         )
         
-        # 接收流式响应并缓存
+        # 传入session作为参数
         async for chunk in generator:
             await process_stream_chunk(
-                chunk, websocket, history_id, full_text, message_id
+                chunk, websocket, history_id, full_text, message_id, session
             )
             if isinstance(chunk, str) and not chunk.startswith("__TOKEN_INFO__"):
                 full_text += chunk
         
-        # LLM响应完成后，进行句子切分
-        complete_text = getattr(websocket, "_text_buffer", "").strip()
-        if complete_text:
-            # 切分成句子
-            sentences = split_text_to_sentences(complete_text)
-            logger.info(f"完整响应文本: '{complete_text}' 切分为 {len(sentences)} 个句子")
-            
-            # 逐句发送处理
-            for i, sentence in enumerate(sentences, 1):
-                if sentence.strip():
-                    logger.debug(f"处理第{i}个句子: '{sentence}'")
-                    
-                    # 为每个句子生成一个音频
-                    audio_path = await process_gsvi_tts(sentence, session)
-                    
-                    if audio_path:
-                        # 构建音频URL
-                        audio_url = f"/static/audio/{os.path.basename(audio_path)}"
-                        
-                        # 发送单个句子的TTS结果
-                        await send_message(websocket, {
-                            "type": "tts_sentence_complete",
-                            "text": sentence,
-                            "audio_url": audio_url,
-                            "history_id": history_id,
-                            "index": i,
-                            "total": len(sentences),
-                            "timestamp": time.time()
-                        })
+        # 处理缓冲区中可能剩余的文本
+        final_buffer = getattr(websocket, "_text_buffer", "").strip()
+        if final_buffer:
+            audio_path = await process_gsvi_tts(final_buffer, session)
+            if audio_path:
+                audio_url = f"/static/audio/{os.path.basename(audio_path)}"
+                await send_message(websocket, {
+                    "type": "tts_sentence_complete",
+                    "text": final_buffer,
+                    "audio_url": audio_url,
+                    "history_id": history_id,
+                    "final": True
+                })
         
-        # 清理会话状态
+        # 清理状态
         delattr(websocket, "_text_buffer")
+        delattr(websocket, "_processed_sentences")
         
-        # 仅发送完整文本用于显示,不包含任何音频URL
+        # 发送流式响应结束消息
         await send_message(websocket, {
             "type": "llm_stream_end",
             "text": full_text,
-            "history_id": history_id,
-            "message_id": message_id
+            "message_id": message_id,
+            "history_id": history_id
         })
         
     except Exception as e:
@@ -576,10 +562,9 @@ def split_text_to_sentences(text: str) -> list[str]:
         
     return sentences
 
-async def process_stream_chunk(chunk, websocket, history_id, full_text, message_id):
-    """处理流式响应的单个数据块"""
+async def process_stream_chunk(chunk, websocket, history_id, full_text, message_id, session):
+    """处理流式响应的单个数据块，支持实时句子检测和TTS处理"""
     if isinstance(chunk, str):
-        # 检查是否是token信息
         if chunk.startswith("__TOKEN_INFO__"):
             try:
                 token_data = json.loads(chunk[14:])
@@ -588,13 +573,42 @@ async def process_stream_chunk(chunk, websocket, history_id, full_text, message_
                 logger.error(f"解析token信息失败: {e}")
             return
 
-        # 获取或初始化文本缓冲区
+        # 初始化或获取缓冲区
         if not hasattr(websocket, "_text_buffer"):
             setattr(websocket, "_text_buffer", "")
+            setattr(websocket, "_processed_sentences", set())  # 记录已处理的句子
         
         buffer = getattr(websocket, "_text_buffer") + chunk
+        processed_sentences = getattr(websocket, "_processed_sentences")
         
-        # 更新文本缓冲区
+        # 检查是否可以切分句子
+        while True:
+            split_result = check_complete_sentence(buffer)
+            if not split_result:
+                break
+            
+            sentence, remaining = split_result
+            sentence = sentence.strip()
+            
+            # 检查句子是否已处理过
+            if sentence and sentence not in processed_sentences:
+                logger.debug(f"检测到完整句子: {sentence}")
+                processed_sentences.add(sentence)
+                
+                # 发送句子进行TTS处理
+                audio_path = await process_gsvi_tts(sentence, session)
+                if audio_path:
+                    audio_url = f"/static/audio/{os.path.basename(audio_path)}"
+                    await send_message(websocket, {
+                        "type": "tts_sentence_complete",
+                        "text": sentence,
+                        "audio_url": audio_url,
+                        "history_id": history_id
+                    })
+            
+            buffer = remaining
+        
+        # 更新缓冲区
         setattr(websocket, "_text_buffer", buffer)
         
         # 发送内容到前端显示
@@ -616,6 +630,26 @@ async def process_stream_chunk(chunk, websocket, history_id, full_text, message_
             message_id = chunk["message_id"]
         elif "token_info" in chunk and "message_id" in chunk["token_info"]:
             message_id = chunk["token_info"]["message_id"]
+
+def check_complete_sentence(text: str) -> Optional[tuple[str, str]]:
+    """检查并返回完整的句子
+    
+    Args:
+        text: 要检查的文本
+        
+    Returns:
+        Optional[tuple[str, str]]: (完整句子, 剩余文本) 或 None
+    """
+    # 定义句子结束标记
+    end_marks = ['。', '！', '？', '，', ',', '!', '?', '.']
+    
+    for i, char in enumerate(text):
+        if char in end_marks:
+            sentence = text[:i + 1]
+            remaining = text[i + 1:]
+            return sentence, remaining
+            
+    return None
 
 async def handle_normal_response(client_id: str, websocket, model, text, history_id, user_id, session):
     """处理普通LLM响应"""
