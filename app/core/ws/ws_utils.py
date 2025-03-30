@@ -12,7 +12,7 @@ import os
 import uuid
 
 from app import logger
-from app.core.ws.audio_service import AudioService
+# 删除 AudioService 导入
 from app.core.ws.audio_websocket_client import AudioWebSocketClient
 from app.core.pipeline.chat_process import chat_process
 from app.core.llm.message import LLMMessage, MessageRole
@@ -37,11 +37,11 @@ async def send_message(websocket, message: Dict[str, Any]):
     """
     try:
         text = json.dumps(message)
-        logger.debug(f"发送消息: {text[:100]}...")
+        # logger.debug(f"发送消息: {text[:100]}...")
         
-        # 检查并记录WebSocket状态
-        if hasattr(websocket, "client_state"):
-            logger.debug(f"[DIAG] 发送前WebSocket状态: {websocket.client_state}")
+        # # 检查并记录WebSocket状态
+        # if hasattr(websocket, "client_state"):
+        #     logger.debug(f"[DIAG] 发送前WebSocket状态: {websocket.client_state}")
         
         # 检查连接是否打开
         if hasattr(websocket, "client_state") and websocket.client_state != WebSocketState.CONNECTED:
@@ -65,9 +65,9 @@ async def send_message(websocket, message: Dict[str, Any]):
         await websocket.send_text(text)
         setattr(websocket, "_last_send_time", time.time())
         
-        # 检查并记录发送后WebSocket状态
-        if hasattr(websocket, "client_state"):
-            logger.debug(f"[DIAG] 发送后WebSocket状态: {websocket.client_state}")
+        # # 检查并记录发送后WebSocket状态
+        # if hasattr(websocket, "client_state"):
+        #     logger.debug(f"[DIAG] 发送后WebSocket状态: {websocket.client_state}")
         
         return True
     except WebSocketDisconnect as e:
@@ -173,8 +173,6 @@ async def handle_start_voice_chat(client_id: str, websocket, data: Dict[str, Any
     # 更新会话信息
     update_session_with_params(session, params)
     
-    logger.info(f"语音聊天客户端 {client_id} 开始录音: 时长={params['duration']}秒, 模型={params['model']}, 历史ID={params['history_id']}, 用户ID={params['user_id']}")
-    
     try:
         # 创建ASR客户端并连接
         asr_client = await create_and_connect_asr_client(
@@ -196,13 +194,41 @@ async def handle_start_voice_chat(client_id: str, websocket, data: Dict[str, Any
             "duration": params["duration"]
         })
         
-        # 创建消息发送器函数及录音完成回调
-        message_sender, recording_task = await create_voice_chat_tasks(
-            client_id, 
-            websocket, 
-            session, 
-            params["duration"]
-        )
+        # 录制音频
+        audio_data = await asr_client.record_audio(params["duration"])
+        
+        # 发送音频数据进行识别
+        await asr_client.recognize_audio(audio_data, check_voiceprint=False)
+        
+        # 获取最终识别文本
+        final_text = await asr_client.get_final_text()
+        
+        if final_text:
+            # 发送识别完成消息
+            result = {
+                "text": final_text,
+                "user": "Unknown"
+            }
+            await send_message(websocket, {
+                "type": "recording",
+                "status": "completed",
+                "result": result
+            })
+            
+            # 创建任务来处理ASR结果
+            asyncio.create_task(
+                handle_voice_chat_asr_complete(
+                    client_id,
+                    websocket,
+                    result,
+                    {client_id: session}
+                )
+            )
+        else:
+            await send_message(websocket, {
+                "type": "error",
+                "message": "未能获取有效的识别结果"
+            })
         
     except Exception as e:
         error_trace = traceback.format_exc()
@@ -212,6 +238,8 @@ async def handle_start_voice_chat(client_id: str, websocket, data: Dict[str, Any
             "type": "error",
             "message": f"启动录音异常: {str(e)}"
         })
+    finally:
+        session["recording_active"] = False
 
 async def create_and_connect_asr_client(client_id: str, server_url: str, session: SessionData) -> Optional[AudioWebSocketClient]:
     """创建并连接ASR客户端"""
@@ -258,14 +286,13 @@ def update_session_with_params(session: SessionData, params: Dict[str, Any]):
 
 async def create_voice_chat_tasks(client_id: str, websocket, session: SessionData, duration: int):
     """创建语音聊天任务"""
-    import asyncio
     
     # 创建消息发送器函数
     async def message_sender(message):
         await send_message(websocket, message)
         
         # 检测到录音完成时，手动调用处理函数
-        if message.get("status") == "completed" and message.get("result"):
+        if message.get("type") == "recording" and message.get("status") == "completed" and message.get("result"):
             # 创建一个任务来处理ASR结果，避免阻塞当前函数
             asyncio.create_task(
                 handle_voice_chat_asr_complete(
@@ -279,24 +306,16 @@ async def create_voice_chat_tasks(client_id: str, websocket, session: SessionDat
     # 定义回调函数，在录音任务完成时检查是否有有效文本
     async def recording_completed(task):
         try:
-            task.result()  # 获取结果，如有异常会抛出
-            logger.debug(f"语音聊天客户端 {client_id} 录音任务正常完成")
-            
-            # 如果没有收到completed消息但收集了final_text，手动处理
-            if not session.get("llm_processing_started", False) and session.get("final_text"):
-                logger.info(f"录音任务结束，手动触发文本处理: {session['final_text']}")
-                # 创建最终结果
-                final_result = {
-                    "text": session.get("final_text", ""),
-                    "user": "未知用户"
-                }
-                # 处理识别结果
-                await handle_voice_chat_asr_complete(
-                    client_id, 
-                    websocket, 
-                    final_result, 
-                    {client_id: session}
-                )
+            result = await task
+            if result and isinstance(result, dict):
+                text = result.get("text", "")
+                if text and text not in ("等待识别结果...", "识别结果将在服务器处理完成后显示"):
+                    # 发送完成消息给模拟的websocket
+                    await message_sender({
+                        "type": "recording",
+                        "status": "completed",
+                        "result": result
+                    })
         except asyncio.CancelledError:
             logger.warning(f"语音聊天 {client_id} 录音任务被取消")
         except Exception as e:
@@ -307,13 +326,17 @@ async def create_voice_chat_tasks(client_id: str, websocket, session: SessionDat
                 "message": f"录音处理异常: {str(e)}"
             })
         finally:
-            # 确保会话被重置
             session["recording_active"] = False
     
-    # 启动录音任务
-    recording_task = asyncio.create_task(AudioService.perform_recording(
-        session, message_sender, duration, False
-    ))
+    # 启动录音和识别任务
+    asr_client = session.get("asr_client")
+    if not asr_client:
+        raise ValueError("ASR客户端未初始化")
+    
+    # 使用 stream_audio_from_mic 方法进行录音和识别
+    recording_task = asyncio.create_task(
+        asr_client.stream_audio_from_mic(duration, check_voiceprint=False)
+    )
     
     # 添加完成回调
     recording_task.add_done_callback(
@@ -388,11 +411,11 @@ async def handle_voice_chat_asr_complete(client_id: str, websocket, result, clie
     text = result.get("text", "")
     
     # 记录收到的识别结果
-    logger.info(f"语音聊天收到ASR结果: {text}")
+    # logger.info(f"语音聊天收到ASR结果: {text}")
     
     # 检查文本是否有效
     if not is_valid_asr_text(text):
-        logger.warning(f"识别结果为空或是等待消息: '{text}'")
+        # logger.warning(f"识别结果为空或是等待消息: '{text}'")
         await send_message(websocket, {
             "type": "error",
             "message": "语音识别失败或没有识别到内容"
@@ -409,7 +432,7 @@ async def handle_voice_chat_asr_complete(client_id: str, websocket, result, clie
     
     try:
         # 发送识别结果给客户端
-        logger.info(f"语音聊天客户端 {client_id} 识别到文本: {text}")
+        # logger.info(f"语音聊天客户端 {client_id} 识别到文本: {text}")
         await send_message(websocket, {
             "type": "asr_result",
             "text": text
@@ -429,8 +452,8 @@ async def handle_voice_chat_asr_complete(client_id: str, websocket, result, clie
             return
         
         # 处理LLM请求
-        logger.info(f"语音聊天客户端 {client_id} 准备发送文本到LLM: '{text}', 历史ID: {llm_params['history_id']}, 流式模式: {llm_params['stream_mode']}")
-        
+        # logger.info(f"语音聊天客户端 {client_id} 准备发送文本到LLM: '{text}', 历史ID: {llm_params['history_id']}, 流式模式: {llm_params['stream_mode']}")
+
         if llm_params["stream_mode"]:
             await handle_stream_response(client_id, websocket, llm_params["model"], text, llm_params["history_id"], llm_params["user_id"], session)
         else:
@@ -471,7 +494,7 @@ def validate_llm_params(params: Dict[str, Any]) -> Optional[str]:
 
 async def handle_stream_response(client_id: str, websocket, model, text, history_id, user_id, session):
     """处理流式LLM响应"""
-    logger.info(f"开始流式LLM请求: model={model}, history_id={history_id}, message='{text}'")
+    # logger.info(f"开始流式LLM请求: model={model}, history_id={history_id}, message='{text}'")
     try:
         # 重置状态
         setattr(websocket, "_text_buffer", "")
@@ -509,7 +532,7 @@ async def handle_stream_response(client_id: str, websocket, model, text, history
         
         # 处理缓冲区中可能剩余的文本
         final_buffer = getattr(websocket, "_text_buffer", "").strip()
-        if final_buffer:
+        if (final_buffer):
             audio_path = await process_gsvi_tts(final_buffer, session)
             if audio_path:
                 audio_url = f"/static/audio/{os.path.basename(audio_path)}"
@@ -592,7 +615,7 @@ async def process_stream_chunk(chunk, websocket, history_id, full_text, message_
             
             # 检查句子是否已处理过
             if sentence and sentence not in processed_sentences:
-                logger.debug(f"检测到完整句子: {sentence}")
+                # logger.debug(f"检测到完整句子: {sentence}")
                 processed_sentences.add(sentence)
                 
                 # 发送句子进行TTS处理
@@ -721,7 +744,7 @@ async def process_gsvi_tts(text: str, session: Dict[str, Any]) -> Optional[str]:
             emotion=emotion
         )
         
-        logger.info(f"GSVI TTS生成完成: {output_path}")
+        # logger.info(f"GSVI TTS生成完成: {output_path}")
         return output_path
         
     except Exception as e:

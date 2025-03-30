@@ -32,6 +32,8 @@ class AudioWebSocketClient:
         self.last_error = None
         self.last_request_id = None
         self.voiceprint_result = None
+        self._final_text = None  # 添加新属性
+        self._text_ready = asyncio.Event()  # 添加事件用于同步
     
     async def connect(self):
         """连接到WebSocket服务器"""
@@ -96,6 +98,8 @@ class AudioWebSocketClient:
                         }
                         # 立即设置流式识别完成事件
                         self.streaming_complete.set()
+                        self._final_text = data["text"]  # 保存最终文本
+                        self._text_ready.set()  # 设置事件表示文本已准备好
             else:
                 error_msg = data.get("error", "未知错误")
                 print(f"请求 {request_id} 失败: {error_msg}")
@@ -486,3 +490,15 @@ class AudioWebSocketClient:
         
         self.audio.terminate()
         print("连接已关闭")
+    
+    async def get_final_text(self) -> str:
+        """等待并返回最终的识别文本"""
+        try:
+            # 等待文本就绪，设置超时时间为5秒
+            await asyncio.wait_for(self._text_ready.wait(), timeout=5.0)
+            return self._final_text or ""
+        except asyncio.TimeoutError:
+            print("等待识别结果超时")
+            return ""
+        finally:
+            self._text_ready.clear()  # 重置事件状态

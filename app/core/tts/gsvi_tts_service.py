@@ -56,7 +56,7 @@ class GSVITTSService:
             api_base = self.api_base.rstrip("/")  # 移除尾部斜杠
             url = f"{api_base}/tts?{'&'.join(query_parts)}"
             
-            logger.info(f"调用GSVI TTS服务: {url[:100]}...")
+            # logger.info(f"调用GSVI TTS服务: {url[:100]}...")
             
             # 发送HTTP请求
             async with aiohttp.ClientSession() as session:

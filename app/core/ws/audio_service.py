@@ -168,20 +168,31 @@ class AudioService:
                             recognition_complete_event.clear()  # 重置事件以便重试
                             result = await recognition_future
                             
-                            # 检查识别结果是否有效
-                            if result and "text" in result and result["text"] not in ("等待识别结果...", "识别结果将在服务器处理完成后显示"):
-                                logger.info(f"获取到有效识别结果: {result.get('text', '')[:30]}...")
-                                valid_result_event.set()
-                                return True
-                            else:
-                                logger.warning(f"第 {attempt} 次识别未得到有效结果，准备重试...")
-                                await asyncio.sleep(0.5)
+                            # 检查识别结果是否有效，如果有效则立即返回
+                            if (result and 
+                                "text" in result and 
+                                isinstance(result["text"], str) and  # 确保是字符串类型
+                                result["text"].strip() and  # 确保不是空字符串
+                                result["text"] not in ("等待识别结果...", "识别结果将在服务器处理完成后显示")):
+                                # 处理文本，去除可能的特殊字符
+                                result["text"] = ''.join(char for char in result["text"] if ord(char) < 65536)
+                                result["text"] = result["text"].strip()
+                                
+                                if result["text"]:  # 确保处理后的文本不为空
+                                    logger.info(f"获取到有效识别结果: {result.get('text', '')[:30]}...")
+                                    valid_result_event.set()
+                                    return True  # 有效结果，立即返回
+                            
+                            logger.warning(f"第 {attempt} 次识别未得到有效结果，准备重试...")
+                            await asyncio.sleep(0.5)
                         except asyncio.TimeoutError:
                             logger.warning(f"第 {attempt} 次识别超时")
                             await asyncio.sleep(0.5)
+                            continue  # 超时后直接继续下一次尝试
                     
-                    # 所有尝试都失败了，最后一次尝试流式处理
+                    # 所有尝试都失败了才尝试流式处理
                     logger.info("主识别未返回有效结果，尝试流式处理方案...")
+                    
                     streaming_task = asyncio.create_task(
                         AudioService.process_streaming_recognition(asr_client, audio_data, check_voiceprint)
                     )
@@ -281,7 +292,7 @@ class AudioService:
             if asr_client:
                 await asr_client.close()
                 session_data["asr_client"] = None
-            logger.info("识别会话已完成并清理")
+            # logger.info("识别会话已完成并清理")
     
     @staticmethod
     async def process_streaming_recognition(asr_client, audio_data, check_voiceprint):

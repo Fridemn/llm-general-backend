@@ -41,16 +41,14 @@ async def voice_assistant_endpoint(websocket: WebSocket):
     client_id = str(uuid.uuid4())
     
     try:
-        # 删除多余的accept调用，只保留一次
         await websocket.accept()
         
         # 禁用自动关闭连接
         websocket.auto_close = False
         
-        logger.info(f"语音助手WebSocket连接成功接受: {client_id}")
+       #  logger.info(f"语音助手WebSocket连接成功接受: {client_id}")
         voice_assistant_connections[client_id] = websocket
         
-        # 初始化语音助手会话
         voice_assistant_sessions[client_id] = create_voice_assistant_session(client_id)
         
         # 发送连接成功消息，增加延迟确保消息发送成功
@@ -66,12 +64,12 @@ async def voice_assistant_endpoint(websocket: WebSocket):
         last_activity = time.time()
         
         # 处理客户端消息
-        logger.info(f"开始处理语音助手客户端 {client_id} 的消息")
+        # logger.info(f"开始处理语音助手客户端 {client_id} 的消息")
         while True:
             try:
                 # 在接收前记录连接状态
                 conn_state = getattr(websocket, "client_state", None)
-                logger.debug(f"[DIAG] 准备接收消息，客户端状态: {conn_state}, 连接ID: {client_id}")
+                # logger.debug(f"[DIAG] 准备接收消息，客户端状态: {conn_state}, 连接ID: {client_id}")
                 
                 # 使用带超时的receive_text
                 try:
@@ -89,15 +87,15 @@ async def voice_assistant_endpoint(websocket: WebSocket):
                 
                 # 记录接收到的消息
                 is_ping = '"ping":true' in data and len(data) < 100
-                if not is_ping:  # 只记录非ping消息
-                    logger.debug(f"从语音助手客户端 {client_id} 收到消息: {data[:100]}...")
+                # if not is_ping:  # 只记录非ping消息
+                #     logger.debug(f"从语音助手客户端 {client_id} 收到消息: {data[:100]}...")
                 
                 # 更新会话的最后活动时间
                 voice_assistant_sessions[client_id]["last_activity"] = time.time()
                 
-                # 检查连接状态
-                if hasattr(websocket, "client_state"):
-                    logger.debug(f"[DIAG] 消息接收后连接状态: {websocket.client_state}, 客户端ID: {client_id}")
+                # # 检查连接状态
+                # if hasattr(websocket, "client_state"):
+                #     logger.debug(f"[DIAG] 消息接收后连接状态: {websocket.client_state}, 客户端ID: {client_id}")
                 
                 # 处理消息
                 await process_voice_assistant_message(client_id, websocket, data, voice_assistant_sessions)
@@ -142,7 +140,7 @@ async def voice_assistant_endpoint(websocket: WebSocket):
             pass
     finally:
         # 清理资源前记录状态
-        logger.debug(f"[DIAG] 准备清理资源，客户端ID: {client_id}, 连接状态: {getattr(websocket, 'client_state', 'unknown')}")
+        # logger.debug(f"[DIAG] 准备清理资源，客户端ID: {client_id}, 连接状态: {getattr(websocket, 'client_state', 'unknown')}")
         # 清理资源
         await cleanup_voice_assistant_client(client_id)
 
@@ -167,20 +165,24 @@ async def process_voice_assistant_message(client_id: str, websocket: WebSocket, 
         if message.get("ping") is True or message.get("keep_alive") is True:
             # 记录保活消息
             is_playback = message.get("playback_active", False)
-            playback_status = ""
+
+
+
+            # playback_status = ""
             
-            # 获取更多播放状态信息
-            if is_playback:
-                if message.get("playback_starting"):
-                    playback_status = " (开始播放)"
-                elif message.get("playback_started"):
-                    playback_status = f" (播放已开始，时长：{message.get('duration', '未知')}秒)"
-                elif message.get("playback_loaded"):
-                    playback_status = " (音频已加载)"
+            # # 获取更多播放状态信息
+            # if is_playback:
+            #     if message.get("playback_starting"):
+            #         playback_status = " (开始播放)"
+            #     elif message.get("playback_started"):
+            #         playback_status = f" (播放已开始，时长：{message.get('duration', '未知')}秒)"
+            #     elif message.get("playback_loaded"):
+            #         playback_status = " (音频已加载)"
             
-            logger_fn = logger.info if is_playback else logger.debug
-            logger_fn(f"[DIAG] 收到{' 音频播放中的' if is_playback else ''}保活消息{playback_status}，客户端ID: {client_id}")
+            # # logger_fn = logger.info if is_playback else logger.debug
+            # # logger_fn(f"[DIAG] 收到{' 音频播放中的' if is_playback else ''}保活消息{playback_status}，客户端ID: {client_id}")
             
+
             # 更新会话状态和活动时间
             session["last_activity"] = time.time()
             if is_playback:
@@ -201,7 +203,9 @@ async def process_voice_assistant_message(client_id: str, websocket: WebSocket, 
             
         # 处理播放完成通知
         if command == "playback_complete":
-            logger.info(f"客户端 {client_id} 通知音频播放已完成")
+
+            
+            # logger.info(f"客户端 {client_id} 通知音频播放已完成")
             
             # 清理会话中的播放状态标记
             for key in ["playback_active", "playback_timestamp", "playback_duration"]:
@@ -237,7 +241,7 @@ async def process_voice_assistant_message(client_id: str, websocket: WebSocket, 
         if message.get("ping") is True:
             # 记录更多上下文信息
             conn_state = getattr(websocket, "client_state", "unknown")
-            logger.debug(f"[DIAG] 收到心跳消息，客户端ID: {client_id}, 连接状态: {conn_state}, 时间戳: {message.get('timestamp', 'none')}")
+            # logger.debug(f"[DIAG] 收到心跳消息，客户端ID: {client_id}, 连接状态: {conn_state}, 时间戳: {message.get('timestamp', 'none')}")
             
             if not (hasattr(websocket, "_last_ping_time") and 
                     time.time() - getattr(websocket, "_last_ping_time", 0) < 1.0):
@@ -260,13 +264,13 @@ async def process_voice_assistant_message(client_id: str, websocket: WebSocket, 
             
         # 处理保活消息
         if message.get("keep_alive") is True or message_type == "keep_alive":
-            logger.debug(f"收到来自 {client_id} 的保活消息")
+            # logger.debug(f"收到来自 {client_id} 的保活消息")
             await send_message(websocket, {"pong": True, "timestamp": time.time()})
             return
             
         # 处理断开连接请求
         if command == "disconnect":
-            logger.info(f"客户端 {client_id} 请求断开连接")
+            # logger.info(f"客户端 {client_id} 请求断开连接")
             await send_message(websocket, {
                 "type": "disconnect_ack",
                 "message": "服务器确认断开请求"
@@ -275,7 +279,7 @@ async def process_voice_assistant_message(client_id: str, websocket: WebSocket, 
         
         # 处理连接信息
         if command == "connection_info":
-            logger.info(f"收到客户端 {client_id} 连接信息: {message.get('client', 'unknown')} {message.get('version', 'unknown')}")
+            # logger.info(f"收到客户端 {client_id} 连接信息: {message.get('client', 'unknown')} {message.get('version', 'unknown')}")
             session["client_info"] = {
                 "client": message.get("client", "unknown"),
                 "version": message.get("version", "unknown"),
@@ -364,7 +368,7 @@ async def process_voice_assistant_message(client_id: str, websocket: WebSocket, 
                 return
                 
             # 只记录完成消息，不进行额外的TTS处理
-            logger.info(f"LLM流式响应完成，总字符数: {len(text)}")
+            # logger.info(f"LLM流式响应完成，总字符数: {len(text)}")
             
             # 仅发送完成通知
             await send_message(websocket, {
@@ -423,7 +427,7 @@ async def send_to_tts(client_id: str, websocket: WebSocket, text: str, session: 
     try:
         # 文本去重处理
         text = remove_duplicate_text(text)
-        logger.info(f"发送文本到TTS服务(去重后): {text[:50]}...")
+        # logger.info(f"发送文本到TTS服务(去重后): {text[:50]}...")
         
         # 设置会话标志，表明我们正在处理TTS
         session["tts_processing"] = True
@@ -436,7 +440,7 @@ async def send_to_tts(client_id: str, websocket: WebSocket, text: str, session: 
             "type": "tts_start",
             "message": "开始生成语音"
         }):
-            logger.warning(f"发送TTS开始消息失败，客户端可能已断开连接")
+            # logger.warning(f"发送TTS开始消息失败，客户端可能已断开连接")
             session.pop("tts_processing", None)
             return
         
@@ -470,7 +474,7 @@ async def send_to_tts(client_id: str, websocket: WebSocket, text: str, session: 
             
             # 记录TTS处理完成时间
             tts_duration = time.time() - tts_start_time
-            logger.debug(f"[DIAG] TTS处理完成，耗时: {tts_duration:.2f}秒, 客户端ID: {client_id}")
+            # logger.debug(f"[DIAG] TTS处理完成，耗时: {tts_duration:.2f}秒, 客户端ID: {client_id}")
             
             if audio_path:
                 # 发送音频URL给客户端
@@ -549,7 +553,7 @@ async def process_tts_queue(client_id: str, websocket: WebSocket, session: Dict[
             
             # 检查是否已处理过相同的文本
             if text in processed_texts:
-                logger.debug(f"跳过重复文本: {text[:30]}...")
+                # logger.debug(f"跳过重复文本: {text[:30]}...")
                 continue
                 
             # 添加到已处理集合
@@ -607,7 +611,7 @@ async def process_gsvi_tts(text: str, session: Dict[str, Any]):
             emotion=emotion
         )
         
-        logger.info(f"GSVI TTS生成完成: {output_path}")
+        # logger.info(f"GSVI TTS生成完成: {output_path}")
         return output_path
         
     except Exception as e:
@@ -639,7 +643,7 @@ async def cleanup_voice_assistant_client(client_id: str):
             
         del voice_assistant_sessions[client_id]
         
-    logger.info(f"语音助手客户端资源已清理: {client_id}")
+    # logger.info(f"语音助手客户端资源已清理: {client_id}")
 
 def create_voice_assistant_session(client_id: str) -> Dict[str, Any]:
     """创建语音助手会话数据"""
