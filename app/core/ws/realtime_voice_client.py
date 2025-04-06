@@ -53,9 +53,9 @@ class AudioStream:
         self.speech_frames = []
         self.is_speaking = False
         self.silence_frames = 0
-        self.MAX_SILENCE_FRAMES = 10  
-        self.min_speech_frames = 3
-        self.audio_rms_threshold = 180
+        self.MAX_SILENCE_FRAMES = 15  # 减少静音帧阈值，缩短结束检测时间
+        self.min_speech_frames = 5  # 至少需要多少帧才确认为语音开始（更严格）
+        self.audio_rms_threshold = 200  # 提高音量RMS阈值，避免低音量噪音
         self.last_process_time = 0
         
     def start_stream(self):
@@ -87,26 +87,39 @@ class AudioStream:
     def detect_speech(self, audio_data):
         """检测是否有语音"""
         try:
+            # 转换为numpy数组
             audio_np = np.frombuffer(audio_data, dtype=np.int16)
+            
+            # 计算RMS音量
             audio_rms = np.sqrt(np.mean(np.square(audio_np.astype(np.float32))))
             
+            # 音量过低，可能是背景噪音
             if audio_rms < self.audio_rms_threshold:
                 return False
                 
+            # 归一化
             audio_float = audio_np.astype(np.float32) / 32768.0
+            
+            # 添加到VAD缓冲区
             self.vad_buffer.append(audio_float)
             
+            # 保持VAD缓冲区大小
             if len(self.vad_buffer) > VAD_WINDOW:
                 self.vad_buffer.pop(0)
                 
+            # 只有当累积足够的帧才进行VAD
             if len(self.vad_buffer) >= 3:
+                # 合并音频片段
                 audio_concat = np.concatenate(self.vad_buffer)
+                # 检测语音
                 speech_timestamps = get_speech_timestamps(
-                    audio_concat, vad_model,
+                    audio_concat, vad_model, 
                     threshold=VAD_THRESHOLD,
                     sampling_rate=RATE
                 )
-                return len(speech_timestamps) > 0
+                # 如果检测到语音，且音量足够
+                if len(speech_timestamps) > 0:
+                    return True
         except Exception as e:
             logger.error(f"VAD处理异常: {e}")
         return False
@@ -114,60 +127,94 @@ class AudioStream:
     def preprocess_audio(self, audio_frames):
         """预处理音频数据以提高质量"""
         try:
+            # 合并所有音频帧
             audio_data = b''.join(audio_frames)
+            
+            # 转换为numpy数组
             audio_np = np.frombuffer(audio_data, dtype=np.int16)
             
+            # 如果音量太小，放大音频
             audio_max = np.max(np.abs(audio_np))
-            if audio_max < 2000:
-                gain = min(32767 / (audio_max + 1), 3.0)
+            if audio_max < 2000:  # 音量太小
+                gain = min(32767 / (audio_max + 1), 5.0)  # 限制最大增益为5倍
                 audio_np = np.clip(audio_np * gain, -32768, 32767).astype(np.int16)
             
+            # 检查处理后的音频是否有效
+            if np.max(np.abs(audio_np)) < 500:
+                logger.warning("预处理后的音频音量仍然太低，可能无法识别")
+                
+            # 转回字节流
             return audio_np.tobytes()
+            
         except Exception as e:
             logger.error(f"音频预处理异常: {e}")
-            return b''.join(audio_frames)
+            return b''.join(audio_frames)  # 出错时返回原始音频
 
     def process_frame(self):
         """处理一帧音频"""
         if self.audio_queue.empty():
             return None
         
+        # 获取音频数据
         audio_data = self.audio_queue.get()
+        
+        # VAD检测
         is_speech = self.detect_speech(audio_data)
         
+        # 状态转换逻辑
         if is_speech:
+            # 如果检测到语音
             self.speech_frames.append(audio_data)
             self.silence_frames = 0
             if not self.is_speaking and len(self.speech_frames) >= self.min_speech_frames:
                 audio_np = np.frombuffer(b''.join(self.speech_frames), dtype=np.int16)
                 rms = np.sqrt(np.mean(np.square(audio_np.astype(np.float32))))
-                if rms > self.audio_rms_threshold:
+                if rms > self.audio_rms_threshold * 1.5:  # 确保音量足够
                     self.is_speaking = True
                     logger.info(f"检测到语音开始... (RMS: {rms:.2f})")
         elif self.is_speaking:
-            self.speech_frames.append(audio_data)
+            # 如果正在说话但当前无语音
+            self.speech_frames.append(audio_data)  # 还是添加进来，可能是短暂停顿
             self.silence_frames += 1
             
+            # 如果静音持续一定时间，结束此次语音
             if self.silence_frames >= self.MAX_SILENCE_FRAMES:
-                complete_audio = b''.join(self.speech_frames)
+                # 预处理音频以提高质量
+                complete_audio = self.preprocess_audio(self.speech_frames)
                 
+                # 添加调试信息
                 audio_np = np.frombuffer(complete_audio, dtype=np.int16)
-                duration = len(audio_np) / 16000
+                duration = len(audio_np) / RATE
                 rms = np.sqrt(np.mean(np.square(audio_np.astype(np.float32))))
                 logger.info(f"检测到语音结束 - 时长: {duration:.2f}秒, RMS音量: {rms:.2f}, 帧数: {len(self.speech_frames)}")
                 
-                if len(self.speech_frames) < 5 or rms < self.audio_rms_threshold * 0.7:
+                # 检查音频数据是否有效（太短或音量太低则丢弃）
+                if len(self.speech_frames) < 8 or rms < self.audio_rms_threshold:  # 语音过短或音量过低
                     logger.warning(f"丢弃无效语音: 长度过短或音量过低")
                     self.speech_frames = []
                     self.is_speaking = False
                     self.silence_frames = 0
                     return None
+                
+                # 检查是否包含有效语音（使用VAD再次验证）
+                audio_float = audio_np.astype(np.float32) / 32768.0
+                speech_timestamps = get_speech_timestamps(
+                    audio_float, vad_model,
+                    threshold=VAD_THRESHOLD,
+                    sampling_rate=RATE
+                )
+                
+                if len(speech_timestamps) == 0:
+                    logger.warning("发送前VAD检测未检出语音，放弃发送")
+                    self.speech_frames = []
+                    self.is_speaking = False
+                    self.silence_frames = 0
+                    return None
                     
-                audio_data = self.preprocess_audio(self.speech_frames)
                 self.speech_frames = []
                 self.is_speaking = False
                 self.silence_frames = 0
-                return audio_data
+                return complete_audio
         
         return None
 
@@ -255,20 +302,47 @@ class RealtimeVoiceClient:
             data = json.loads(message)
             
             if data.get("type") == "response":
+                # 记录完整响应数据，便于调试
+                logger.info(f"收到完整响应: {data}")
+                
                 if data.get("success"):
                     if "text" in data:
                         response = {
                             "text": data["text"],
-                            "user": data.get("user", "Unknown")
+                            "user": data.get("user", "Unknown"),
+                            "voice_match": data.get("voice_match", False)
                         }
                         self.current_response = response
                         self.response_received.set()
                         logger.info(f"收到识别响应: {response}")
                 else:
                     error = data.get("error", "未知错误")
-                    logger.warning(f"识别失败: {error}")
-                    self.current_response = {"error": error}
-                    self.response_received.set()
+                    error_code = data.get("code", "UNKNOWN_ERROR")
+                    
+                    # 处理不同类型的错误
+                    if error_code == "UNREGISTERED_USER":
+                        # 未注册用户仍然可以识别文本
+                        logger.info(f"未注册用户语音: {error}")
+                        text = data.get("text", "")
+                        if text:
+                            response = {
+                                "text": text,
+                                "user": "Unknown",
+                                "voice_match": False
+                            }
+                            self.current_response = response
+                            self.response_received.set()
+                        else:
+                            self.current_response = {"error": error, "code": error_code}
+                            self.response_received.set()
+                    elif error_code == "ASR_FAILED" and "No speech detected" in error:
+                        logger.info("服务器VAD未检测到语音，可能是音量过低")
+                        self.current_response = {"error": error, "code": error_code}
+                        self.response_received.set()
+                    else:
+                        logger.warning(f"识别失败: [{error_code}] {error}")
+                        self.current_response = {"error": error, "code": error_code}
+                        self.response_received.set()
                 
             elif data.get("type") == "error":
                 logger.error(f"服务器错误: {data.get('message', '未知错误')}")
@@ -440,6 +514,12 @@ class RealtimeVoiceClient:
             self.response_received.clear()
             self.current_response = None
             
+            # 音频质量检查
+            audio_np = np.frombuffer(audio_data, dtype=np.int16)
+            rms = np.sqrt(np.mean(np.square(audio_np.astype(np.float32))))
+            duration = len(audio_np) / RATE
+            logger.info(f"发送音频数据 - 时长: {duration:.2f}秒, RMS音量: {rms:.2f}")
+            
             # Base64编码
             audio_base64 = base64.b64encode(audio_data).decode('utf-8')
             
@@ -459,9 +539,10 @@ class RealtimeVoiceClient:
                 "data": {
                     "audio_data": audio_base64,
                     "check_voiceprint": True,
-                    "only_register_user": True
+                    "only_register_user": False,  # 允许识别所有用户
+                    "identify_unregistered": True  # 启用识别未注册用户的语音
                 },
-                "request_id": str(uuid.uuid4())  # 添加请求ID
+                "request_id": str(uuid.uuid4())
             }
             
             await self.websocket.send(json.dumps(request))
@@ -469,18 +550,56 @@ class RealtimeVoiceClient:
             
             # 等待响应
             try:
-                await asyncio.wait_for(self.response_received.wait(), timeout=5.0)
+                await asyncio.wait_for(self.response_received.wait(), timeout=10.0)
                 if self.current_response:
                     response = self.current_response
                     self.current_response = None  # 清除当前响应
+                    
                     if "text" in response:
+                        # 获取用户信息并格式化文本
+                        recognized_text = response["text"]
+                        user = response.get("user", "Unknown")
+                        voice_match = response.get("voice_match", False)
+                        
+                        # 打印详细的用户识别信息
+                        logger.info(f"识别结果 - 用户: {user}, 声纹匹配: {voice_match}")
+                        
+                        # 格式化文本（添加用户标签）
+                        if user and user != "Unknown" and user.lower() != "unknown":
+                            # 已注册用户
+                            formatted_text = f"{recognized_text}[{user}]"
+                            logger.info(f"已识别为注册用户: {user}")
+                        else:
+                            # 未注册用户
+                            formatted_text = f"{recognized_text}[访客]"
+                            logger.info("已识别为访客")
+                        
+                        # 更新带有用户标识的文本
+                        response["text"] = formatted_text
                         self.final_result = response
-                        self._final_text = response["text"]
+                        self._final_text = formatted_text
                         self._text_ready.set()
-                        logger.info(f"收到识别结果: {response['text']}")
+                        logger.info(f"最终识别结果: {formatted_text}")
+                    elif "error" in response:
+                        error_code = response.get("code", "UNKNOWN_ERROR")
+                        error_msg = response.get("error", "未知错误")
+                        
+                        if error_code == "UNREGISTERED_USER" and "text" in response:
+                            # 未注册用户但有识别文本
+                            recognized_text = response["text"]
+                            formatted_text = f"{recognized_text}[访客]"
+                            response["text"] = formatted_text
+                            self.final_result = response
+                            self._final_text = formatted_text
+                            self._text_ready.set()
+                            logger.info(f"未注册用户识别结果: {formatted_text}")
+                        else:
+                            logger.warning(f"识别错误: {error_code}: {error_msg}")
+                            self.final_result = {"error": error_msg, "code": error_code}
+                            self._text_ready.set()
                     else:
-                        logger.warning("响应中未包含文本内容")
-                        self.final_result = {"error": "未收到有效文本"}
+                        logger.warning("响应中未包含文本内容或错误信息")
+                        self.final_result = {"error": "未收到有效内容"}
                         self._text_ready.set()
                 else:
                     logger.warning("未收到有效响应")
