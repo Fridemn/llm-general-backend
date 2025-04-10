@@ -3,8 +3,8 @@ import asyncio
 import json
 import os
 import uuid
-import time  # 添加time模块导入
-from typing import Dict, Any
+import time
+from typing import Dict, Any, List
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import logger
@@ -14,7 +14,8 @@ from app.core.pipeline.chat_process import chat_process
 from app.core.llm.message import LLMMessage, MessageRole
 
 from app.core.pipeline.text_process import text_process
-from app.core.tts.gsvi_tts_service import GSVITTSService  # 添加这行导入
+from app.core.tts.tts_service import GSVITTSService, synthesize_text
+from app.core.config.voice_config import get_voice_config, get_voice_config_section
 from starlette.websockets import WebSocketDisconnect
 
 api_realtime = APIRouter()
@@ -34,6 +35,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 获取WebSocket配置
+ws_config = get_voice_config_section("websocket")
+HEARTBEAT_INTERVAL = ws_config.get("heartbeat_interval", 15)
 
 # 挂载WebSocket路由
 app.include_router(api_realtime, prefix="/ws")
@@ -96,7 +101,7 @@ async def heartbeat_check(client_id: str, websocket: WebSocket):
     """心跳检测"""
     while True:
         try:
-            await asyncio.sleep(15)  # 15秒检查一次
+            await asyncio.sleep(HEARTBEAT_INTERVAL)  # 使用配置的心跳间隔
             if not await send_message(websocket, {"type": "ping"}):
                 break
         except Exception as e:
@@ -151,8 +156,12 @@ async def handle_start_command(client_id: str, websocket: WebSocket,
         return
         
     try:
+        # 获取ASR服务器URL，优先使用客户端提供的，其次使用配置文件
+        asr_config = get_voice_config_section("asr_service")
+        server_url = data.get("server_url") or asr_config.get("server_url")
+        
         # 创建语音客户端
-        voice_client = RealtimeVoiceClient(data.get("server_url", "ws://127.0.0.1:8765"))
+        voice_client = RealtimeVoiceClient(server_url)
         session["voice_client"] = voice_client
         
         # 连接语音服务器
@@ -411,36 +420,55 @@ async def handle_stream_llm_response(client_id: str, websocket: WebSocket,
 async def process_tts_for_sentence(sentence: str, websocket: WebSocket, history_id: str):
     """为单句话处理TTS并发送结果给客户端"""
     try:
-        # 创建TTS服务客户端
-        tts_service = GSVITTSService(api_base="http://127.0.0.1:5000")
+        # 获取TTS配置
+        tts_config = get_voice_config_section("tts_service")
+        api_base = tts_config.get("api_base", "http://127.0.0.1:5000")
         
-        # 生成唯一的音频文件名
-        output_filename = f"tts_response_{uuid.uuid4()}.mp3"
-        output_path = os.path.join("static/audio", output_filename)
+        # 创建TTS服务客户端
+        tts_service = GSVITTSService(api_base=api_base)
+        
+        # 生成唯一的音频文件名 - 修改为.wav扩展名，与GSVI TTS API保持一致
+        output_filename = f"tts_response_{uuid.uuid4()}.wav"
+        output_dir = tts_config.get("output_dir", "static/audio")
+        output_path = os.path.join(output_dir, output_filename)
         
         # 确保目录存在
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         
-        # 生成语音
-        await tts_service.synthesize(
+        # 生成语音，即使失败也会返回占位文件路径
+        file_path = await tts_service.synthesize(
             text=sentence,
             output_file=output_path
         )
         
-        # 创建相对URL路径
-        audio_url = f"/static/audio/{output_filename}"
+        # 创建相对URL路径 - 确保使用正确的文件名
+        audio_url = f"/static/audio/{os.path.basename(file_path)}"
+        
+        # 检查文件是否成功生成且大小合适
+        tts_success = os.path.exists(file_path) and os.path.getsize(file_path) > 1000  # 确保文件大小至少1KB
+        
+        logger.info(f"TTS结果: 文件={file_path}, 大小={os.path.getsize(file_path) if os.path.exists(file_path) else 0}字节, 成功={tts_success}")
         
         # 发送TTS结果给客户端
         await send_message(websocket, {
             "type": "tts_sentence_complete",
             "text": sentence,
             "audio_url": audio_url,
-            "history_id": history_id
+            "history_id": history_id,
+            "tts_success": tts_success
         })
         
     except Exception as e:
         logger.error(f"TTS处理异常: {e}")
-        # 不中断流程，只记录错误
+        # 不中断流程，发送一个没有音频的响应
+        await send_message(websocket, {
+            "type": "tts_sentence_complete",
+            "text": sentence,
+            "audio_url": None,
+            "history_id": history_id,
+            "tts_success": False,
+            "error": str(e)
+        })
 
 def create_realtime_session(client_id: str) -> Dict[str, Any]:
     """创建会话数据"""
@@ -451,7 +479,7 @@ def create_realtime_session(client_id: str) -> Dict[str, Any]:
         "model": None,
         "history_id": None,
         "user_id": None,
-        "last_heartbeat": time.time(),  # 现在可以正确使用time模块
+        "last_heartbeat": time.time(),
         "reconnect_attempts": 0
     }
     

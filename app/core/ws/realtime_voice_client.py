@@ -14,17 +14,24 @@ import logging
 import time
 import queue
 
+from app.core.config.voice_config import get_voice_config, get_voice_config_section
+
 # 配置日志
 logging.basicConfig(level=logging.INFO, 
                    format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("realtime_voice")
 
-# 音频配置
-RATE = 16000
-CHANNELS = 1
-CHUNK = 1600  # 100ms
-FORMAT = pyaudio.paInt16
-VAD_WINDOW = 30  # VAD窗口大小(帧数)
+# 从配置文件加载音频参数
+audio_config = get_voice_config_section("audio_config")
+RATE = audio_config.get("rate", 16000)
+CHANNELS = audio_config.get("channels", 1)
+CHUNK = audio_config.get("chunk", 1600)
+FORMAT = getattr(pyaudio, audio_config.get("format", "paInt16"))
+
+# 从配置文件加载VAD参数
+vad_config = get_voice_config_section("vad_config")
+VAD_WINDOW = vad_config.get("window", 30)
+VAD_THRESHOLD = vad_config.get("threshold", 0.3)
 
 # VAD模型初始化
 try:
@@ -35,7 +42,6 @@ try:
         onnx=False
     )
     get_speech_timestamps = utils[0]
-    VAD_THRESHOLD = 0.3  # 降低VAD阈值以提高灵敏度
     logger.info("VAD模型加载成功")
 except Exception as e:
     logger.error(f"VAD模型加载失败: {e}")
@@ -53,9 +59,11 @@ class AudioStream:
         self.speech_frames = []
         self.is_speaking = False
         self.silence_frames = 0
-        self.MAX_SILENCE_FRAMES = 15  # 减少静音帧阈值，缩短结束检测时间
-        self.min_speech_frames = 5  # 至少需要多少帧才确认为语音开始（更严格）
-        self.audio_rms_threshold = 200  # 提高音量RMS阈值，避免低音量噪音
+        
+        # 从配置加载VAD参数
+        self.MAX_SILENCE_FRAMES = vad_config.get("max_silence_frames", 15)
+        self.min_speech_frames = vad_config.get("min_speech_frames", 5)
+        self.audio_rms_threshold = vad_config.get("audio_rms_threshold", 200)
         self.last_process_time = 0
         
     def start_stream(self):
@@ -219,8 +227,10 @@ class AudioStream:
         return None
 
 class RealtimeVoiceClient:
-    def __init__(self, server_url: str = "ws://127.0.0.1:8765"):
-        self.server_url = server_url
+    def __init__(self, server_url: str = None):
+        # 从配置获取ASR服务器URL
+        asr_config = get_voice_config_section("asr_service")
+        self.server_url = server_url or asr_config.get("server_url", "ws://127.0.0.1:8765")
         self.websocket = None
         self.is_connected = False
         
@@ -235,8 +245,9 @@ class RealtimeVoiceClient:
         self.final_result = None
         self._final_text = None
         
-        # API密钥
-        self.api_key = "dd91538f5918826f2bdf881e88fe9956"
+        # 从配置获取API密钥
+        self.api_key = asr_config.get("api_key", "dd91538f5918826f2bdf881e88fe9956")
+        self.timeout = asr_config.get("timeout", 10.0)
 
     async def connect(self):
         """连接到WebSocket服务器"""
@@ -354,105 +365,6 @@ class RealtimeVoiceClient:
             self.current_response = {"error": f"处理消息异常: {str(e)}"}
             self.response_received.set()
 
-    def detect_speech(self, audio_data: bytes) -> bool:
-        """检测是否有语音"""
-        try:
-            # 转换为numpy数组并计算RMS音量
-            audio_np = np.frombuffer(audio_data, dtype=np.int16)
-            audio_rms = np.sqrt(np.mean(np.square(audio_np.astype(np.float32))))
-            
-            # 音量过低判断
-            if audio_rms < self.audio_rms_threshold:
-                return False
-                
-            # 归一化并处理VAD
-            audio_float = audio_np.astype(np.float32) / 32768.0
-            self.vad_buffer.append(audio_float)
-            
-            # 保持VAD窗口大小
-            if len(self.vad_buffer) > 30:  # VAD窗口
-                self.vad_buffer.pop(0)
-                
-            # 执行VAD检测
-            if len(self.vad_buffer) >= 3:
-                audio_concat = np.concatenate(self.vad_buffer)
-                speech_timestamps = self.get_speech_timestamps(
-                    audio_concat,
-                    self.vad_model,
-                    threshold=self.vad_threshold,
-                    sampling_rate=self.rate
-                )
-                return len(speech_timestamps) > 0
-                
-        except Exception as e:
-            logger.error(f"VAD处理异常: {e}")
-            
-        return False
-        
-    async def process_frame(self, frame_data: bytes) -> Optional[bytes]:
-        """处理单帧音频"""
-        try:
-            # VAD检测
-            is_speech = self.detect_speech(frame_data)
-            
-            if is_speech:
-                # 检测到语音
-                self.speech_frames.append(frame_data)
-                self.silence_frames = 0
-                
-                if not self.is_speaking and len(self.speech_frames) >= self.min_speech_frames:
-                    audio_np = np.frombuffer(b''.join(self.speech_frames), dtype=np.int16)
-                    rms = np.sqrt(np.mean(np.square(audio_np.astype(np.float32))))
-                    
-                    if rms > self.audio_rms_threshold:
-                        self.is_speaking = True
-                        logger.info(f"检测到语音开始... (RMS: {rms:.2f})")
-                        
-            elif self.is_speaking:
-                # 当前无语音但正在说话状态
-                self.speech_frames.append(frame_data)
-                self.silence_frames += 1
-                
-                # 静音超过阈值,结束此次语音
-                if self.silence_frames >= self.max_silence_frames:
-                    complete_audio = b''.join(self.speech_frames)
-                    
-                    # 添加调试信息
-                    audio_np = np.frombuffer(complete_audio, dtype=np.int16) 
-                    duration = len(audio_np) / self.rate
-                    rms = np.sqrt(np.mean(np.square(audio_np.astype(np.float32))))
-                    logger.info(f"检测到语音结束 - 时长: {duration:.2f}秒, RMS: {rms:.2f}")
-                    
-                    # 简化有效性检查
-                    if len(self.speech_frames) < 5 or rms < self.audio_rms_threshold * 0.7:
-                        logger.info("丢弃无效语音: 长度过短或音量过低")
-                        self.reset_speech_state()
-                        return None
-                        
-                    self.reset_speech_state()
-                    return self.preprocess_audio(complete_audio)
-                    
-        except Exception as e:
-            logger.error(f"处理音频帧异常: {e}")
-            
-        return None
-
-    def preprocess_audio(self, audio_data: bytes) -> bytes:
-        """预处理音频数据以提高质量"""
-        try:
-            audio_np = np.frombuffer(audio_data, dtype=np.int16)
-            
-            # 简化处理逻辑，只进行基本增益调整
-            audio_max = np.max(np.abs(audio_np))
-            if (audio_max < 2000):  # 音量太小
-                gain = min(32767 / (audio_max + 1), 3.0)  # 降低最大增益为3倍
-                audio_np = np.clip(audio_np * gain, -32768, 32767).astype(np.int16)
-            
-            return audio_np.tobytes()
-        except Exception as e:
-            logger.error(f"音频预处理异常: {e}")
-            return audio_data
-
     async def start_stream(self):
         """开始音频流"""
         if self.is_streaming:
@@ -490,18 +402,6 @@ class RealtimeVoiceClient:
             self.audio_stream.stop_stream()
             self.audio_stream = None
         logger.info("停止音频流")
-        
-    async def handle_audio_frame(self, frame_data: bytes):
-        """处理音频回调帧"""
-        try:
-            complete_audio = await self.process_frame(frame_data)
-            
-            if complete_audio:
-                # 发送音频进行识别
-                await self.send_audio(complete_audio)
-                
-        except Exception as e:
-            logger.error(f"处理音频帧异常: {e}")
             
     async def send_audio(self, audio_data: bytes):
         """发送音频进行识别"""
@@ -550,7 +450,7 @@ class RealtimeVoiceClient:
             
             # 等待响应
             try:
-                await asyncio.wait_for(self.response_received.wait(), timeout=10.0)
+                await asyncio.wait_for(self.response_received.wait(), timeout=self.timeout)
                 if self.current_response:
                     response = self.current_response
                     self.current_response = None  # 清除当前响应
@@ -620,8 +520,12 @@ class RealtimeVoiceClient:
             self.final_result = {"error": str(e)}
             self._text_ready.set()
 
-    async def wait_for_result(self, timeout: float = 10.0) -> Optional[Dict[str, Any]]:
+    async def wait_for_result(self, timeout: float = None) -> Optional[Dict[str, Any]]:
         """等待识别结果"""
+        # 如果未指定超时，使用配置值
+        if timeout is None:
+            timeout = self.timeout
+            
         try:
             # 增加超时时间并添加重试机制
             max_retries = 3
@@ -654,9 +558,6 @@ class RealtimeVoiceClient:
             if self.websocket:
                 await self.websocket.close()
                 self.is_connected = False
-                
-            if self.audio:
-                self.audio.terminate()
                 
             logger.info("客户端已关闭")
         except Exception as e:

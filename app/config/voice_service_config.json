@@ -1,0 +1,28 @@
+{
+    "asr_service": {
+        "server_url": "ws://127.0.0.1:8765",
+        "api_key": "dd91538f5918826f2bdf881e88fe9956",
+        "timeout": 10.0
+    },
+    "tts_service": {
+        "api_base": "http://127.0.0.1:5000",
+        "output_dir": "static/audio"
+    },
+    "audio_config": {
+        "rate": 16000,
+        "channels": 1,
+        "chunk": 1600,
+        "format": "paInt16"
+    },
+    "vad_config": {
+        "window": 30,
+        "threshold": 0.3,
+        "min_speech_frames": 5,
+        "max_silence_frames": 15,
+        "audio_rms_threshold": 200
+    },
+    "websocket": {
+        "heartbeat_interval": 15,
+        "connection_timeout": 60
+    }
+}
