@@ -9,11 +9,8 @@ from app import logger,app_config
 from app.api.user import api_user
 from app.api.system import api_system
 from app.api.llm import api_llm
-from app.api.ws import api_ws
 from app.api.realtime_ws import api_realtime
 from fastapi.staticfiles import StaticFiles
-
-#from wordease.api.user import api_user
 
 logo_tmpl=r"""
 ----------------------------------------
@@ -57,7 +54,6 @@ app.add_middleware(
 app.include_router(api_user, prefix="/user", tags=["用户相关接口"])
 app.include_router(api_system, prefix="/system", tags=["系统相关接口"])
 app.include_router(api_llm, prefix="/llm", tags=["大语言模型相关接口"])
-app.include_router(api_ws, prefix="/ws", tags=["websocket相关接口"])
 app.include_router(api_realtime, prefix="/ws", tags=["websocket"])
 
 app.mount('/static', StaticFiles(directory='static'), name='static')
