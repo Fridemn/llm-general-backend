@@ -4,7 +4,7 @@ import json
 import os
 import uuid
 import time
-from typing import Dict, Any, List
+from typing import Dict, Any
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import logger
@@ -14,8 +14,8 @@ from app.core.pipeline.chat_process import chat_process
 from app.core.llm.message import LLMMessage, MessageRole
 
 from app.core.pipeline.text_process import text_process
-from app.core.tts.tts_service import GSVITTSService, synthesize_text
-from app.core.config.voice_config import get_voice_config, get_voice_config_section
+from app.core.tts.tts_service import GSVITTSService
+from app.core.config.voice_config import get_voice_config_section
 from starlette.websockets import WebSocketDisconnect
 
 api_realtime = APIRouter()
