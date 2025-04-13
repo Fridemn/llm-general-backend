@@ -1,1 +1,13 @@
 tiktoken>=0.6.0
+uvicorn
+fastapi
+tortoise-orm
+colorlog
+redis
+PyJWT
+alibabacloud-dysmsapi20170525
+alibabacloud-tea-openapi
+edge_tts
+python-multipart
+aiomysql
+openai
