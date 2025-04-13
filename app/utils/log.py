@@ -77,3 +77,16 @@ class LogManager:
         else:
             handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
         logger.addHandler(handler)
+        
+    @classmethod
+    def configure_tortoise_logger(cls, level: int = logging.WARNING):
+        """配置Tortoise ORM的日志级别
+        
+        Args:
+            level: 日志级别，默认为WARNING以上才输出
+        """
+        # 设置tortoise相关日志的级别
+        logging.getLogger('tortoise').setLevel(level)
+        logging.getLogger('tortoise.db_client').setLevel(level)
+        logging.getLogger('asyncio').setLevel(level)
+        logging.getLogger('aiomysql').setLevel(level)
