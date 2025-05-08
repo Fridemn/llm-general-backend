@@ -51,3 +51,18 @@ base_url=""
 
 安装 MySQL 和 Redis，将配置文件写入 secret.py，
 运行 main.py 自动建表
+
+## 开始开发
+
+可以使用 pip 或 [Poetry](https://python-poetry.org/docs) 安装依赖。
+
+- pip  
+  ```bash
+  pip install requirements.txt
+  ```
+
+- Poetry  
+  ```bash
+  poetry env use python
+  poetry install
+  ```
