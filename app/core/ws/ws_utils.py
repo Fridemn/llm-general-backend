@@ -17,40 +17,43 @@ from starlette.websockets import WebSocketState, WebSocketDisconnect
 WebSocketSender = Callable[[Dict[str, Any]], Awaitable[None]]
 SessionData = Dict[str, Any]
 
+
 async def send_message(websocket, message: Dict[str, Any]):
     """发送消息到客户端
-    
+
     Args:
         websocket: FastAPI WebSocket连接
         message: 要发送的消息字典
-        
+
     Returns:
         bool: 是否成功发送消息
     """
     try:
         text = json.dumps(message)
-        
+
         # 检查连接是否打开
         if hasattr(websocket, "client_state") and websocket.client_state != WebSocketState.CONNECTED:
-            logger.warning(f"WebSocket未连接，状态为: {websocket.client_state}，尝试发送的消息类型: {message.get('type', 'unknown')}")
+            logger.warning(
+                f"WebSocket未连接，状态为: {websocket.client_state}，尝试发送的消息类型: {message.get('type', 'unknown')}"
+            )
             return False
-            
+
         # 添加消息队列缓存逻辑，保证一定间隔
         if not hasattr(websocket, "_last_send_time"):
             setattr(websocket, "_last_send_time", 0)
-            
+
         # 如果消息过于密集，添加小延迟防止消息阻塞
         last_send = getattr(websocket, "_last_send_time", 0)
         if time.time() - last_send < 0.05:  # 50ms的最小间隔
             await asyncio.sleep(0.01)  # 10ms延迟
-        
+
         if hasattr(websocket, "_close_called"):
             setattr(websocket, "_close_called", False)  # 重置关闭标志
-        
+
         # 发送消息
         await websocket.send_text(text)
         setattr(websocket, "_last_send_time", time.time())
-        
+
         return True
     except WebSocketDisconnect as e:
         # 客户端已断开，记录更多细节

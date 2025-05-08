@@ -1,4 +1,3 @@
-
 import hashlib
 import string
 import secrets
@@ -17,24 +16,26 @@ from app.config.constant import REDIS_USER_REGISTER_CODE, REDIS_USER_LOGIN_CODE,
 from app.utils.verification_code_platform import SendSms
 from app import redis_client
 
-jwt_config=app_config.jwt_config
-SECRET_KEY=jwt_config["jwt_secret_key"]
-ALGORITHM = 'HS256'
+jwt_config = app_config.jwt_config
+SECRET_KEY = jwt_config["jwt_secret_key"]
+ALGORITHM = "HS256"
 
 
-#------------------------------
+# ------------------------------
 #         邀请码部分
-#------------------------------
+# ------------------------------
+
 
 def generate_invitation_code(length=6):
     # 使用 secrets 生成一个包含字母和数字的随机字符串
     characters = string.ascii_letters + string.digits  # 可以根据需要增加字符集
-    return ''.join(secrets.choice(characters) for i in range(length))
+    return "".join(secrets.choice(characters) for i in range(length))
 
 
-#------------------------------
+# ------------------------------
 #         密钥安全部分
-#------------------------------
+# ------------------------------
+
 
 # 生成 JWT Token
 def create_jwt(current_user: user):
@@ -47,6 +48,7 @@ def create_jwt(current_user: user):
     # 生成 token
     token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM, headers=headers)
     return token
+
 
 def decode_jwt(token: str):
     try:
@@ -72,9 +74,10 @@ def md5(s):
     return m.hexdigest()
 
 
-#------------------------------
+# ------------------------------
 #         获取用户部分
-#------------------------------
+# ------------------------------
+
 
 # 获取当前用户信息
 def get_current_user(token: str):
@@ -113,11 +116,11 @@ async def get_code(phone: str, REDIS_PATH: str):
     # 重置密码
     # SMS_476695363
     if REDIS_PATH == REDIS_USER_REGISTER_CODE:
-        await SendSms.exec(phone, 'SMS_476785298', str(code))
+        await SendSms.exec(phone, "SMS_476785298", str(code))
     elif REDIS_PATH == REDIS_USER_LOGIN_CODE:
-        await SendSms.exec(phone, 'SMS_476855314', str(code))
+        await SendSms.exec(phone, "SMS_476855314", str(code))
     elif REDIS_PATH == REDIS_USER_RESET_CODE:
-        await SendSms.exec(phone, 'SMS_476695363', str(code))
+        await SendSms.exec(phone, "SMS_476695363", str(code))
 
     # 存储验证码到Redis中
     result = redis_client.set(REDIS_PATH + phone, str(code), ex=300)  # 过期时间五分钟
@@ -138,12 +141,10 @@ async def check_code(code: str, phone: str, REDIS_PATH: str):
         raise HTTPException(status_code=400, detail="验证码已过期！")
     return True
 
+
 def generate_account():
     """基于时间戳和随机数生成唯一的7位账号"""
     timestamp = int(time.time() * 1000)  # 获取毫秒级时间戳
     random_suffix = random.randint(0, 99)  # 随机生成一个0到99的数字
     account = str(timestamp)[-5:] + f"{random_suffix:02d}"  # 时间戳后5位 + 2位随机数
     return account
-
-
-

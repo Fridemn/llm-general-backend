@@ -10,11 +10,12 @@ from app import logger, app_config
 from app.api.user import api_user
 from app.api.system import api_system
 from app.api.llm import api_llm
+
 # from app.api.realtime_ws import api_realtime
 from app.utils.log import LogManager
 from fastapi.staticfiles import StaticFiles
 
-logo_tmpl=r"""
+logo_tmpl = r"""
 ----------------------------------------
             app已经运行
 ----------------------------------------
@@ -24,6 +25,7 @@ mysql_config = app_config.mysql_config
 
 def check_env():
     os.makedirs("data/", exist_ok=True)
+
 
 # 在初始化FastAPI应用之前配置Tortoise日志
 LogManager.configure_tortoise_logger(logging.WARNING)
@@ -44,10 +46,13 @@ register_tortoise(
     add_exception_handlers=True,  # 显示错误信息
 )
 check_env()
+
+
 @app.get("/")
 async def root():
     return {"message": "欢迎使用API模板"}
-    
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # 允许所有来源
@@ -61,8 +66,8 @@ app.include_router(api_system, prefix="/system", tags=["系统相关接口"])
 app.include_router(api_llm, prefix="/llm", tags=["大语言模型相关接口"])
 # app.include_router(api_realtime, prefix="/ws", tags=["websocket"])
 
-app.mount('/static', StaticFiles(directory='static'), name='static')
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     logger.info(logo_tmpl)
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)

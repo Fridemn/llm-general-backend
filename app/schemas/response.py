@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from typing import Optional
 
+
 class ResponseModel(BaseModel):
     message: str
     data: Optional[dict] = None  # data 字段可以包含任意字典数据，如果没有数据可以为空
@@ -12,7 +13,5 @@ class ResponseModel(BaseModel):
 
     @classmethod
     def fail(cls, message: str, data: Optional[dict] = None):
-        
+
         return cls(message=message, data=data)
-
-
