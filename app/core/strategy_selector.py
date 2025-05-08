@@ -16,7 +16,7 @@ class StrategySelector(Generic[T]):
     泛型参数 T 代表策略提供者的类型
     """
 
-    def __init__(self, config_path_or_active: str, config_type_or_config: str = None):
+    def __init__(self, config_path_or_active: str, config_type_or_config: Optional[str] = None):
         """
         初始化策略选择器
 

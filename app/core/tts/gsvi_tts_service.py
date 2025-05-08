@@ -7,7 +7,7 @@ import aiohttp
 import os
 import asyncio
 import urllib.parse
-from typing import Optional, Dict, Any
+from typing import Optional
 
 from app import logger
 
@@ -15,7 +15,7 @@ from app import logger
 class GSVITTSService:
     """GSVI TTS服务实现"""
 
-    def __init__(self, api_base: str = None):
+    def __init__(self, api_base: Optional[str] = None):
         """初始化GSVI TTS服务
 
         Args:

@@ -1,6 +1,6 @@
 import os
 import json
-from typing import Dict
+from typing import Optional
 import logging
 
 from .constant import APP_CONFIG_PATH, DEFAULT_VALUE_MAP
@@ -18,7 +18,9 @@ class AppConfig(dict):
     - 如果传入了 schema，将会通过 schema 解析出 default_config，此时传入的 default_config 会被忽略。
     """
 
-    def __init__(self, config_path: str = APP_CONFIG_PATH, default_config: dict = DEFAULT_CONFIG, schema: dict = None):
+    def __init__(
+        self, config_path: str = APP_CONFIG_PATH, default_config: dict = DEFAULT_CONFIG, schema: Optional[dict] = None
+    ):
         super().__init__()
         # 调用父类的 __setattr__ 方法，防止保存配置时将此属性写入配置文件
         object.__setattr__(self, "config_path", config_path)
@@ -68,7 +70,7 @@ class AppConfig(dict):
 
         return conf
 
-    def check_config_integrity(self, refer_conf: Dict, conf: Dict, path=""):
+    def check_config_integrity(self, refer_conf: dict, conf: dict, path=""):
         """检查配置完整性，如果有新的配置项则返回 True
         参考default配置文件，检查配置文件是否完整，以及是否有新的配置项
         """
@@ -88,7 +90,7 @@ class AppConfig(dict):
                     has_new |= self.check_config_integrity(value, conf[key], path + "." + key if path else key)
         return has_new
 
-    def save_config(self, replace_config: Dict = None):
+    def save_config(self, replace_config: Optional[dict] = None):
         """将配置写入文件
 
         如果传入 replace_config，则将配置替换为 replace_config
