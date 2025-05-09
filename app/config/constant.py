@@ -1,5 +1,3 @@
-
-
 APP_CONFIG_PATH = "data/cmd_config.json"
 
 DEFAULT_VALUE_MAP = {
@@ -12,6 +10,6 @@ DEFAULT_VALUE_MAP = {
     "object": {},
 }
 
-REDIS_USER_REGISTER_CODE = 'user:register:code:'
-REDIS_USER_LOGIN_CODE = 'user:login:code:'
-REDIS_USER_RESET_CODE = 'user:reset:code:'
+REDIS_USER_REGISTER_CODE = "user:register:code:"
+REDIS_USER_LOGIN_CODE = "user:login:code:"
+REDIS_USER_RESET_CODE = "user:reset:code:"

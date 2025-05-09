@@ -12,73 +12,75 @@ from app.core.tts.tts_factory import TTSFactory
 from app.core.llm.message import MessageComponent, MessageType
 
 # 创建音频文件存储目录
-AUDIO_STORAGE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), 'static', 'audio')
+AUDIO_STORAGE_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), "static", "audio"
+)
 os.makedirs(AUDIO_STORAGE_DIR, exist_ok=True)
+
 
 class VoiceProcess:
     """
     语音处理流水线，负责STT和TTS功能
     """
-    
+
     def __init__(self):
         pass
-    
+
     def path_to_url(self, file_path: str) -> str:
         """
         将本地文件路径转换为URL路径
-        
+
         Args:
             file_path: 本地文件完整路径
-            
+
         Returns:
             转换后的URL路径
         """
         # 检查路径是否包含static/audio部分
-        if 'static/audio' in file_path.replace('\\', '/'):
-            parts = file_path.replace('\\', '/').split('static/audio/')
+        if "static/audio" in file_path.replace("\\", "/"):
+            parts = file_path.replace("\\", "/").split("static/audio/")
             if len(parts) > 1:
                 return f"/static/audio/{parts[1]}"
-        
+
         # 如果路径直接是文件名，直接返回相对路径
         file_name = os.path.basename(file_path)
         return f"/static/audio/{file_name}"
-        
+
     async def process_stt(self, audio_file_path: str) -> str:
         """
         语音转文本处理
-        
+
         Args:
             audio_file_path: 音频文件路径
-            
+
         Returns:
             转写的文本内容
         """
         # 使用STT工厂获取STT提供者
         stt_provider = STTFactory.create_provider()
-        
+
         if stt_provider is None:
             logger.error("无法创建STT提供者")
             raise ValueError("无法创建STT提供者")
-        
-        
+
         # 使用提供者处理音频
         transcribed_text = await stt_provider.transcribe(audio_file_path)
         logger.info(f"语音转录结果: {transcribed_text}")
-        
+
         # 检查转录结果是否为空
         if not transcribed_text.strip():
             raise ValueError("语音转录结果为空")
-            
+
         return transcribed_text
-    
+
     async def save_audio_file(self, audio_file, temp_dir: Optional[str] = None) -> Dict[str, str]:
         """
         保存音频文件到临时目录和永久存储
-        
+
         Args:
             audio_file: FastAPI的UploadFile对象
             temp_dir: 临时目录路径
-            
+
         Returns:
             包含临时和永久文件路径的字典
         """
@@ -87,43 +89,43 @@ class VoiceProcess:
         if temp_dir is None:
             temp_dir = tempfile.mkdtemp()
             should_delete_temp = True
-            
+
         file_extension = os.path.splitext(audio_file.filename)[1]
         audio_file_path = os.path.join(temp_dir, f"audio_{uuid.uuid4()}{file_extension}")
-        
+
         # 保存上传的文件到临时位置
         with open(audio_file_path, "wb") as buffer:
             shutil.copyfileobj(audio_file.file, buffer)
-        
+
         # 为永久存储创建文件名（使用时间戳和UUID确保唯一性）
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{timestamp}_{uuid.uuid4()}{file_extension}"
         permanent_audio_path = os.path.join(AUDIO_STORAGE_DIR, filename)
-        
+
         # 生成URL路径
         permanent_audio_url = self.path_to_url(permanent_audio_path)
-        
+
         logger.info(f"音频文件临时保存至: {audio_file_path}")
         logger.info(f"音频文件将永久保存至: {permanent_audio_path}")
         logger.info(f"音频文件URL路径: {permanent_audio_url}")
-        
+
         return {
             "temp_path": audio_file_path,
             "permanent_path": permanent_audio_path,
             "permanent_url": permanent_audio_url,
             "filename": filename,
             "temp_dir": temp_dir,
-            "should_delete_temp": should_delete_temp
+            "should_delete_temp": should_delete_temp,
         }
-    
+
     def save_to_permanent_storage(self, temp_path: str, permanent_path: str) -> bool:
         """
         将临时音频文件复制到永久存储位置
-        
+
         Args:
             temp_path: 临时文件路径
             permanent_path: 永久存储文件路径
-            
+
         Returns:
             是否成功保存
         """
@@ -134,11 +136,11 @@ class VoiceProcess:
         except Exception as e:
             logger.error(f"将音频文件复制到永久位置失败: {str(e)}")
             return False
-    
+
     def cleanup_temp_files(self, temp_dir: str) -> None:
         """
         清理临时文件和目录
-        
+
         Args:
             temp_dir: 临时目录路径
         """
@@ -148,32 +150,32 @@ class VoiceProcess:
                 logger.debug(f"临时目录已清理: {temp_dir}")
             except Exception as e:
                 logger.error(f"清理临时目录失败: {str(e)}")
-    
+
     async def process_tts(self, text: str) -> Optional[str]:
         """
         文本转语音处理
-        
+
         Args:
             text: 需要转为语音的文本
-            
+
         Returns:
             生成的音频文件路径，如果失败则为None
         """
         if not text.strip():
             logger.warning("TTS输入文本为空")
             return None
-            
+
         try:
             # 使用TTS工厂获取TTS提供者
             tts_provider = TTSFactory.create_provider()
-            
+
             if tts_provider is None:
                 logger.error("无法创建TTS提供者")
                 return None
-                
+
             # 生成音频文件
             audio_path = await tts_provider.get_audio(text)
-            
+
             if audio_path:
                 logger.info(f"TTS音频生成成功: {audio_path}")
                 # 返回web访问路径
@@ -181,43 +183,41 @@ class VoiceProcess:
             else:
                 logger.error("TTS音频生成失败，路径为空")
                 return None
-                
+
         except Exception as e:
             logger.error(f"TTS处理失败: {str(e)}")
             return None
-    
-    def create_audio_component(self, audio_path: str, text: str = "", 
-                              extra_info: Optional[Dict[str, Any]] = None) -> MessageComponent:
+
+    def create_audio_component(
+        self, audio_path: str, text: str = "", extra_info: Optional[Dict[str, Any]] = None
+    ) -> MessageComponent:
         """
         创建音频消息组件
-        
+
         Args:
             audio_path: 音频文件路径或URL
             text: 相关文本
             extra_info: 额外信息
-            
+
         Returns:
             创建的音频消息组件
         """
         extra = extra_info or {}
-        
+
         if text:
             # 如果有文本，则添加到extra信息中
             extra["original_text"] = text[:100] + "..." if len(text) > 100 else text
-        
+
         # 确保路径是URL格式
-        if os.path.exists(audio_path) or ':\\' in audio_path:
+        if os.path.exists(audio_path) or ":\\" in audio_path:
             audio_url = self.path_to_url(audio_path)
             # 保存原始路径用于文件存在性检查
             extra["file_path"] = audio_path
         else:
             audio_url = audio_path
-            
-        return MessageComponent(
-            type=MessageType.AUDIO,
-            content=audio_url,
-            extra=extra
-        )
+
+        return MessageComponent(type=MessageType.AUDIO, content=audio_url, extra=extra)
+
 
 # 全局语音处理实例
 voice_process = VoiceProcess()

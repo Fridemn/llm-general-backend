@@ -5,29 +5,28 @@
 包括登录注册，LLM 基本功能的后端项目。
 
 ## 主要功能
-- 登录注册功能（略）此部分来源于 https://github.com/QodiCat/UserTemplete
-- LLM 部分
-    - LLM 调用
-    - 流式输出
-    - 创建历史记录
-    - 读取历史记录
-    - 删除历史记录
-    - 历史记录自动总结
+
+- 登录注册功能（略）  
+  此部分来源于 https://github.com/QodiCat/UserTemplete
+- LLM 部分  
+  - LLM 调用
+  - 流式输出
+  - 创建历史记录
+  - 读取历史记录
+  - 删除历史记录
+  - 历史记录自动总结
 
 ## 使用方法
 
-在 app/config/ 下创建一个 secret.py 文件，格式如下：
+在 `app/config/` 下创建一个 `secret.py` 文件，格式如下：
 
 ```python
-
-
 #mysql 配置 不变的常量才用大写的
 mysql_server=""
 mysql_port=
 mysql_user=""
 mysql_password=""
 mysql_database=""
-
 
 #redis 配置
 redis_host=""
@@ -37,7 +36,6 @@ redis_pord=6379
 
 #jwt密钥配置
 jwt_secrect_config=""
-
 
 #验证码平台配置
 alibaba_cloud_accesskey_iD=""
@@ -49,5 +47,19 @@ api_key=""
 base_url=""
 ```
 
-安装 MySQL 和 Redis，将配置文件写入 secret.py，
-运行 main.py 自动建表
+安装 MySQL 和 Redis，将配置文件写入 `secret.py`，运行 main.py 自动建表。
+
+## 开始开发
+
+可以使用 pip 或 [Poetry](https://python-poetry.org/docs) 安装依赖。
+
+- pip  
+  ```bash
+  pip install requirements.txt
+  ```
+
+- Poetry  
+  ```bash
+  poetry env use python
+  poetry install
+  ```

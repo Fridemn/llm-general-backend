@@ -1,0 +1,30 @@
+[project]
+name = "llm-general-backend"
+version = "0.1.0"
+description = ""
+authors = []
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.9,<4"
+dependencies = [
+    "tiktoken (>=0.9)",
+    "uvicorn (>=0.34)",
+    "fastapi (>=0.115)",
+    "tortoise-orm (>=0.24)",
+    "colorlog (>=6.8)",
+    "redis (>=6.0)",
+    "pyjwt (>=2.10)",
+    "alibabacloud-dysmsapi20170525 (>=4.1.0)",
+    "alibabacloud-tea-openapi (>=0.3)",
+    "edge-tts (>=7.0)",
+    "python-multipart (>=0.0)",
+    "aiomysql (>=0.2)",
+    "openai (>=1.76)"
+]
+
+[tool.poetry]
+package-mode = false
+
+[build-system]
+requires = ["poetry-core>=2.0"]
+build-backend = "poetry.core.masonry.api"
